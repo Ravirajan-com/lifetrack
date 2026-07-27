@@ -10,6 +10,9 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import com.lifetrack.app.data.db.dao.ExpenseDao
 import com.lifetrack.app.data.db.dao.GoalDao
 import com.lifetrack.app.data.db.dao.GymDao
+import com.lifetrack.app.creditcard.CreditCardDao
+import com.lifetrack.app.creditcard.CreditCardEntity
+import com.lifetrack.app.creditcard.CreditCardStatementEntity
 import com.lifetrack.app.data.db.entity.CategoryEntity
 import com.lifetrack.app.data.db.entity.ExerciseEntity
 import com.lifetrack.app.data.db.entity.GoalCompletionEntity
@@ -29,9 +32,10 @@ import com.lifetrack.app.data.db.entity.WorkoutCategoryEntity
         TagEntity::class, TxnTagCrossRef::class, MonthlySummaryEntity::class,
         WorkoutCategoryEntity::class, ExerciseEntity::class,
         SessionEntity::class, SetLogEntity::class,
-        GoalEntity::class, GoalCompletionEntity::class
+        GoalEntity::class, GoalCompletionEntity::class,
+        CreditCardEntity::class, CreditCardStatementEntity::class
     ],
-    version = 7,
+    version = 8,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -39,6 +43,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun expenseDao(): ExpenseDao
     abstract fun gymDao(): GymDao
     abstract fun goalDao(): GoalDao
+    abstract fun creditCardDao(): CreditCardDao
 
     companion object {
 
@@ -122,6 +127,38 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v7 -> v8: tracked credit cards, their statement history, and a link column on
+         * transactions. New enum case (CREDIT_CARD) needs no migration -- exclusionSource is
+         * stored as plain TEXT with no CHECK constraint (see Converters.kt), so a new Kotlin
+         * constant is automatically forward/backward compatible.
+         */
+        private val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `credit_cards` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`name` TEXT NOT NULL, " +
+                        "`lastFourDigits` TEXT NOT NULL, " +
+                        "`bank` TEXT, " +
+                        "`colorHex` TEXT NOT NULL, " +
+                        "`emoji` TEXT NOT NULL, " +
+                        "`createdAt` INTEGER NOT NULL)"
+                )
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_credit_cards_lastFourDigits` ON `credit_cards` (`lastFourDigits`)")
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `credit_card_statements` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`cardId` INTEGER NOT NULL, " +
+                        "`statementDate` INTEGER NOT NULL, " +
+                        "`totalDue` REAL, " +
+                        "`rawSms` TEXT)"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_credit_card_statements_cardId` ON `credit_card_statements` (`cardId`)")
+                db.execSQL("ALTER TABLE `transactions` ADD COLUMN `creditCardId` INTEGER DEFAULT NULL")
+            }
+        }
+
         @Volatile private var instance: AppDatabase? = null
 
         fun get(context: Context): AppDatabase =
@@ -129,7 +166,7 @@ abstract class AppDatabase : RoomDatabase() {
                 instance ?: Room.databaseBuilder(
                     context.applicationContext, AppDatabase::class.java, "lifetrack.db"
                 )
-                    .addMigrations(MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
+                    .addMigrations(MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
                     // Safety net while you're still iterating on the schema. Room prefers a real
                     // migration when one exists and only wipes when no path is found.
                     // DELETE THIS LINE before you ship / start keeping data you care about.

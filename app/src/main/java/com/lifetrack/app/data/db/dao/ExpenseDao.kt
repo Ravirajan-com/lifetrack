@@ -211,6 +211,16 @@ interface ExpenseDao {
     @Query("UPDATE transactions SET note = :note WHERE id = :txnId")
     suspend fun updateTxnNote(txnId: Long, note: String)
 
+    /** Permanently removes one transaction. Categories/rules are untouched. */
+    @Query("DELETE FROM transactions WHERE id = :id")
+    suspend fun deleteTxn(id: Long)
+
+    @androidx.room.Transaction
+    suspend fun deleteTxnCascade(txnId: Long) {
+        clearTagsForTxn(txnId)
+        deleteTxn(txnId)
+    }
+
     @Query("SELECT DISTINCT bank FROM transactions WHERE bank IS NOT NULL ORDER BY bank")
     fun allBanks(): Flow<List<String>>
 

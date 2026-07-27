@@ -1,3 +1,4 @@
+@file:OptIn(ExperimentalMaterial3Api::class)
 package com.lifetrack.app.ui.expense
 
 import androidx.compose.foundation.background
@@ -46,7 +47,6 @@ import java.time.format.DateTimeFormatter
 import java.util.Date
 import java.util.Locale
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ExpenseScreen(vm: ExpenseViewModel = viewModel()) {
     var tab by remember { mutableIntStateOf(0) }
@@ -77,12 +77,12 @@ fun ExpenseScreen(vm: ExpenseViewModel = viewModel()) {
                 containerColor = MaterialTheme.colorScheme.background,
                 contentColor = Ink.mint,
             ) {
-                listOf("Overview", "Activity", "Year", "Inbox").forEachIndexed { i, t ->
+                listOf("Overview", "Activity", "Year", "Cards", "Inbox").forEachIndexed { i, t ->
                     Tab(
                         selected = tab == i,
                         onClick = { tab = i },
                         text = {
-                            val label = if ((i == 3) && (pendingCount > 0)) "$t · $pendingCount" else t
+                            val label = if ((i == 4) && (pendingCount > 0)) "$t · $pendingCount" else t
                             Text(label)
                         },
                         selectedContentColor = Ink.mint,
@@ -90,7 +90,7 @@ fun ExpenseScreen(vm: ExpenseViewModel = viewModel()) {
                     )
                 }
             }
-            if (tab < 2) {
+            if (tab == 0 || tab == 1) {
                 MonthPicker(vm)
             }
             when (tab) {
@@ -102,7 +102,8 @@ fun ExpenseScreen(vm: ExpenseViewModel = viewModel()) {
                 )
                 1 -> ActivityTab(vm) { detailing = it }
                 2 -> YearTab(vm) { showArchive = true }
-                3 -> InboxTab(vm) { detailing = it }
+                3 -> CreditCardsTab(vm)
+                4 -> InboxTab(vm) { detailing = it }
             }
         }
     }
@@ -555,7 +556,7 @@ private fun TxnList(
                         color = Ink.textDim
                     )
                     val tags = tagsByTxn[t.id].orEmpty()
-                    if (tags.isNotEmpty()) {
+                    if (tags.size > 0) {
                         Row(
                             Modifier.padding(top = 4.dp),
                             horizontalArrangement = Arrangement.spacedBy(4.dp)
@@ -616,6 +617,7 @@ private fun TransactionDetailsSheet(
     var isExcluded by remember { mutableStateOf(txn.isExcluded) }
     var note by remember { mutableStateOf(txn.note ?: "") }
     var isEditingNote by remember { mutableStateOf(false) }
+    var confirmDeleteTxn by remember { mutableStateOf(false) }
 
     Column(
         Modifier
@@ -625,7 +627,12 @@ private fun TransactionDetailsSheet(
     ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text("Transaction Details", style = MaterialTheme.typography.titleSmall, color = Ink.textDim)
-            IconButton(onClick = onDone) { Icon(Icons.Default.Close, null) }
+            Row {
+                IconButton(onClick = { confirmDeleteTxn = true }) {
+                    Icon(Icons.Default.DeleteOutline, "Delete transaction", tint = Ink.danger)
+                }
+                IconButton(onClick = onDone) { Icon(Icons.Default.Close, null) }
+            }
         }
 
         Spacer(Modifier.height(16.dp))
@@ -811,6 +818,27 @@ private fun TransactionDetailsSheet(
             onCreate = { name, color -> vm.addTag(name, color); showNewTag = false }
         )
     }
+
+    if (confirmDeleteTxn) {
+        AlertDialog(
+            onDismissRequest = { confirmDeleteTxn = false },
+            title = { Text("Delete this transaction?") },
+            text = {
+                Text(
+                    "\"${txn.merchant}\" for ₹%,.2f will be permanently removed. This cannot be undone."
+                        .format(txn.amount)
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.deleteTransaction(txn.id)
+                    confirmDeleteTxn = false
+                    onDone()
+                }) { Text("Delete", color = Ink.danger) }
+            },
+            dismissButton = { TextButton(onClick = { confirmDeleteTxn = false }) { Text("Cancel") } }
+        )
+    }
 }
 
 @Composable
@@ -867,6 +895,320 @@ private fun DetailRow(label: String, value: String) {
     Row(Modifier.fillMaxWidth()) {
         Text(label, style = MaterialTheme.typography.bodyMedium, color = Ink.textDim, modifier = Modifier.weight(1f))
         Text(value, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+    }
+}
+
+/**
+ * Credit cards, deliberately isolated from every other tab. A card's transactions never appear
+ * in Overview/Activity/Year totals -- they carry isExcluded=true, exclusionSource=CREDIT_CARD.
+ * This tab is the only place they're visible, by design: individual charges are "a loan" until
+ * the bill is paid, and the bill payment itself is also excluded rather than counted, since the
+ * user's mental model treats the whole credit-card lifecycle as separate from bank-account cash
+ * flow, not as a second copy of it.
+ */
+@Composable
+private fun CreditCardsTab(vm: ExpenseViewModel) {
+    val summaries by vm.creditCardSummaries.collectAsState()
+    val status by vm.creditCardStatus.collectAsState()
+    var showAddCard by remember { mutableStateOf(false) }
+    var openCardId by remember { mutableStateOf<Long?>(null) }
+
+    LazyColumn(
+        Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        item {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Eyebrow("Your cards", Modifier.weight(1f))
+                TextButton(onClick = { vm.runCreditCardRematch() }) { Text("Rematch", color = Ink.textDim) }
+                IconButton(onClick = { showAddCard = true }) {
+                    Icon(Icons.Default.Add, "Add card", tint = Ink.mint)
+                }
+            }
+        }
+
+        status?.let { s ->
+            item {
+                Text(s, style = MaterialTheme.typography.labelSmall, color = Ink.mint)
+            }
+        }
+
+        if (summaries.isEmpty()) {
+            item {
+                InkCard(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(20.dp)) {
+                        Text(
+                            "No credit cards tracked yet.",
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            "A card is added automatically the first time its statement SMS " +
+                                "arrives (\"Credit Card XX1234 Statement...\"). Import your SMS " +
+                                "from the Inbox tab, or add one manually with the + above.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Ink.textDim
+                        )
+                    }
+                }
+            }
+        }
+
+        items(summaries, key = { it.card.id }) { summary ->
+            CreditCardRow(summary, onClick = { openCardId = summary.card.id })
+        }
+
+        item { Spacer(Modifier.height(20.dp)) }
+    }
+
+    if (showAddCard) {
+        ModalBottomSheet(onDismissRequest = { showAddCard = false }) {
+            AddCreditCardSheet(vm) { showAddCard = false }
+        }
+    }
+
+    openCardId?.let { id ->
+        val summary = summaries.firstOrNull { it.card.id == id }
+        if (summary != null) {
+            ModalBottomSheet(onDismissRequest = { openCardId = null }) {
+                CreditCardDetailSheet(vm, summary) { openCardId = null }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CreditCardRow(summary: ExpenseViewModel.CreditCardSummary, onClick: () -> Unit) {
+    val card = summary.card
+    InkCard(Modifier.fillMaxWidth().clickable(onClick = onClick)) {
+        Column(Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier.size(40.dp).clip(CircleShape).background(parseColor(card.colorHex).copy(alpha = 0.18f)),
+                    contentAlignment = Alignment.Center
+                ) { Text(card.emoji, fontSize = 18.sp) }
+                Spacer(Modifier.width(16.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(card.name, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold)
+                    Text(
+                        "•••• ${card.lastFourDigits} · this cycle",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Ink.textDim
+                    )
+                }
+                Text("₹%,.0f".format(summary.cycleSpend), style = MaterialTheme.typography.titleMedium)
+            }
+            summary.lastStatementTotal?.let { total ->
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Last bill: ₹%,.0f".format(total),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Ink.textDim
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun AddCreditCardSheet(vm: ExpenseViewModel, onDone: () -> Unit) {
+    var name by remember { mutableStateOf("") }
+    var last4 by remember { mutableStateOf("") }
+    var color by remember { mutableStateOf("#7E57C2") }
+    val palette = listOf("#7E57C2", "#FF7043", "#42A5F5", "#26A69A", "#EC407A", "#FFA726", "#66BB6A", "#78909C")
+
+    Column(
+        Modifier
+            .padding(20.dp)
+            .imePadding()
+            .verticalScroll(rememberScrollState())
+    ) {
+        Text("Add Credit Card", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "Only needed if a statement SMS for this card hasn't arrived yet -- otherwise it's " +
+                "added automatically.",
+            style = MaterialTheme.typography.labelSmall,
+            color = Ink.textDim
+        )
+        Spacer(Modifier.height(20.dp))
+        OutlinedTextField(
+            value = name,
+            onValueChange = { name = it },
+            label = { Text("Card name (e.g. HDFC Card)") },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true
+        )
+        Spacer(Modifier.height(12.dp))
+        OutlinedTextField(
+            value = last4,
+            onValueChange = { if (it.length <= 4 && it.all(Char::isDigit)) last4 = it },
+            label = { Text("Last 4 digits") },
+            placeholder = { Text("1234") },
+            modifier = Modifier.fillMaxWidth(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            singleLine = true
+        )
+        Eyebrow("Color", Modifier.padding(top = 20.dp, bottom = 12.dp))
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            items(palette) { c ->
+                Box(
+                    Modifier
+                        .size(40.dp)
+                        .clip(CircleShape)
+                        .background(Color(c.toColorInt()))
+                        .clickable { color = c }
+                        .padding(4.dp)
+                ) {
+                    if (color == c) {
+                        Box(Modifier.fillMaxSize().clip(CircleShape).background(Color.White.copy(0.4f)))
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(28.dp))
+        Button(
+            onClick = { vm.addCreditCard(name, last4, color, "💳"); onDone() },
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.buttonColors(containerColor = Ink.mint),
+            enabled = name.isNotBlank() && last4.length == 4
+        ) { Text("Add Card", color = Ink.bg, fontWeight = FontWeight.Bold) }
+        Spacer(Modifier.height(16.dp))
+    }
+}
+
+@Composable
+private fun CreditCardDetailSheet(
+    vm: ExpenseViewModel,
+    summary: ExpenseViewModel.CreditCardSummary,
+    onDone: () -> Unit
+) {
+    val card = summary.card
+    val txns by vm.txnsForCard(card.id).collectAsState()
+    val statements by vm.statementsForCard(card.id).collectAsState()
+    var editing by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
+    var name by remember(card.id) { mutableStateOf(card.name) }
+
+    Column(
+        Modifier
+            .padding(horizontal = 20.dp)
+            .imePadding()
+            .verticalScroll(rememberScrollState())
+    ) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                if (editing) {
+                    OutlinedTextField(
+                        value = name, onValueChange = { name = it },
+                        singleLine = true, modifier = Modifier.fillMaxWidth()
+                    )
+                } else {
+                    Text(card.name, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                }
+                Text("•••• ${card.lastFourDigits}", style = MaterialTheme.typography.labelSmall, color = Ink.textDim)
+            }
+            IconButton(onClick = {
+                if (editing) vm.updateCreditCard(card.id, name, card.colorHex, card.emoji)
+                editing = !editing
+            }) {
+                Icon(if (editing) Icons.Default.Check else Icons.Default.Edit, null, tint = Ink.mint)
+            }
+            IconButton(onClick = onDone) { Icon(Icons.Default.Close, null) }
+        }
+
+        Spacer(Modifier.height(16.dp))
+        InkCard(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(20.dp)) {
+                Text("THIS CYCLE", style = MaterialTheme.typography.labelMedium, color = Ink.textDim)
+                Text("₹%,.0f".format(summary.cycleSpend), style = MaterialTheme.typography.displayLarge)
+                Text(
+                    "${summary.cycleTxnCount} transaction(s) since " +
+                        SimpleDateFormat("dd MMM", Locale.getDefault()).format(Date(summary.cycleStart)),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Ink.textDim
+                )
+            }
+        }
+
+        if (statements.isNotEmpty()) {
+            Spacer(Modifier.height(20.dp))
+            Eyebrow("Statement history")
+            InkCard(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(vertical = 8.dp)) {
+                    statements.forEach { st ->
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                SimpleDateFormat("dd MMM yyyy", Locale.getDefault()).format(Date(st.statementDate)),
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            Text(
+                                st.totalDue?.let { "₹%,.0f".format(it) } ?: "—",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = Ink.textDim
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(20.dp))
+        Eyebrow("Transactions")
+        if (txns.isEmpty()) {
+            Text("Nothing yet.", style = MaterialTheme.typography.labelSmall, color = Ink.textDim, modifier = Modifier.padding(vertical = 12.dp))
+        } else {
+            Column {
+                txns.forEach { t ->
+                    Row(
+                        Modifier.fillMaxWidth().padding(vertical = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column {
+                            Text(t.merchant, style = MaterialTheme.typography.bodyMedium)
+                            Text(
+                                SimpleDateFormat("dd MMM", Locale.getDefault()).format(Date(t.timestamp)),
+                                style = MaterialTheme.typography.labelSmall, color = Ink.textDim
+                            )
+                        }
+                        Text(
+                            "₹%,.0f".format(t.amount),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (t.type == TxnType.CREDIT) Ink.mint else Ink.text
+                        )
+                    }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(20.dp))
+        TextButton(onClick = { confirmDelete = true }, modifier = Modifier.fillMaxWidth()) {
+            Icon(Icons.Default.DeleteOutline, null, Modifier.size(18.dp), tint = Ink.danger)
+            Spacer(Modifier.width(8.dp))
+            Text("Stop tracking this card", color = Ink.danger)
+        }
+        Spacer(Modifier.height(24.dp))
+    }
+
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("Stop tracking ${card.name}?") },
+            text = { Text("Its transactions move back into your normal Overall spending instead of staying separate.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.deleteCreditCard(card.id)
+                    confirmDelete = false
+                    onDone()
+                }) { Text("Remove", color = Ink.danger) }
+            },
+            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } }
+        )
     }
 }
 
@@ -1227,14 +1569,6 @@ fun BudgetEditDialog(category: CategoryEntity, onDismiss: () -> Unit, onSave: (D
     }
 }
 
-/**
- * The budget control centre.
- *
- * The old dashboard could only reach a category's budget by tapping a row in the Categories card,
- * and that card only rendered categories that already had spend this month — so a fresh category
- * (or a fresh install) had no reachable budget UI at all. This lists every category unconditionally
- * and adds the overall monthly cap that never existed.
- */
 @Composable
 private fun BudgetSheet(vm: ExpenseViewModel, onDone: () -> Unit) {
     val categories by vm.categories.collectAsState()
@@ -1353,7 +1687,6 @@ private fun BudgetSheet(vm: ExpenseViewModel, onDone: () -> Unit) {
     }
 }
 
-/** Rename / recolor / delete an existing category. Previously there was no way to do any of this. */
 @Composable
 private fun EditCategorySheet(vm: ExpenseViewModel, category: CategoryEntity, onDone: () -> Unit) {
     var name by remember { mutableStateOf(category.name) }
@@ -1449,8 +1782,6 @@ private fun EditCategorySheet(vm: ExpenseViewModel, category: CategoryEntity, on
     }
 }
 
-
-/** Tiny inline tag marker used in list rows. */
 @Composable
 private fun TagPill(name: String, color: Color) {
     Text(
@@ -1465,18 +1796,11 @@ private fun TagPill(name: String, color: Color) {
     )
 }
 
-/**
- * Activity = the month list, with search layered on top.
- *
- * When no filter is active it behaves exactly as before (current month). The moment you type or
- * pick a filter it switches to searching ALL history, because "find that transaction" almost never
- * means "find it inside the month I happen to be looking at".
- */
 @Composable
 private fun ActivityTab(vm: ExpenseViewModel, onTap: (TransactionEntity) -> Unit) {
     val filters by vm.searchFilters.collectAsState()
     val categories by vm.categories.collectAsState()
-    val tags by vm.tags.collectAsState()
+    val allTags by vm.tags.collectAsState()
     val tagsByTxn by vm.tagsByTxn.collectAsState()
     val monthTxns by vm.filteredTxns.collectAsState()
     val results by vm.searchResults.collectAsState()
@@ -1555,10 +1879,10 @@ private fun ActivityTab(vm: ExpenseViewModel, onTap: (TransactionEntity) -> Unit
                     }
                 }
 
-                if (tags.isNotEmpty()) {
+                if (allTags.size > 0) {
                     Eyebrow("Tag")
                     LazyRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        items(tags, key = { it.id }) { g ->
+                        items(allTags, key = { it.id }) { g ->
                             FilterChip(
                                 selected = filters.tagId == g.id,
                                 onClick = {
@@ -1614,7 +1938,6 @@ private fun ActivityTab(vm: ExpenseViewModel, onTap: (TransactionEntity) -> Unit
     }
 }
 
-/** Twelve-month history with a simple bar chart and the year's category split. */
 @Composable
 private fun YearTab(vm: ExpenseViewModel, onOpenArchive: () -> Unit) {
     val state by vm.yearView.collectAsState()
@@ -1774,12 +2097,6 @@ private fun YearTab(vm: ExpenseViewModel, onOpenArchive: () -> Unit) {
     }
 }
 
-/**
- * Export old transactions to a local JSON file, then optionally delete them from the database.
- *
- * Shows the real database size, because the intuition that an expense tracker is eating storage
- * is usually wrong — a few thousand transactions is on the order of a megabyte.
- */
 @Composable
 private fun ArchiveSheet(vm: ExpenseViewModel, onDone: () -> Unit) {
     val preview by vm.archivePreview.collectAsState()
@@ -1893,6 +2210,7 @@ private fun ArchiveSheet(vm: ExpenseViewModel, onDone: () -> Unit) {
         Spacer(Modifier.height(32.dp))
     }
 }
+
 
 private fun String.takeIn(predicate: (String) -> Boolean): String? {
     return if (predicate(this)) this else null

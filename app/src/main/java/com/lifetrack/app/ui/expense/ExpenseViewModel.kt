@@ -4,6 +4,7 @@ import android.app.Application
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.lifetrack.app.creditcard.CreditCardEntity
 import com.lifetrack.app.data.db.AppDatabase
 import com.lifetrack.app.data.db.dao.CategorySpend
 import com.lifetrack.app.data.db.dao.TxnTagLink
@@ -87,6 +88,7 @@ data class DashboardUiState(
 class ExpenseViewModel(app: Application) : AndroidViewModel(app) {
 
     private val dao = AppDatabase.get(app).expenseDao()
+    private val cardDao = AppDatabase.get(app).creditCardDao()
     private val repo = ExpenseRepository.get(app)
     private val budgetPrefs = BudgetPrefs.get(app)
     private val archive = ArchiveRepository.get(app)
@@ -507,6 +509,11 @@ class ExpenseViewModel(app: Application) : AndroidViewModel(app) {
         dao.updateTxnNote(txnId, note)
     }
 
+    /** Permanently removes one transaction (and its tag links). Categories/rules are untouched. */
+    fun deleteTransaction(txnId: Long) = viewModelScope.launch {
+        dao.deleteTxnCascade(txnId)
+    }
+
     private val _transferSweep = MutableStateFlow<String?>(null)
     val transferSweepStatus: StateFlow<String?> = _transferSweep
 
@@ -578,8 +585,8 @@ class ExpenseViewModel(app: Application) : AndroidViewModel(app) {
             "Nothing new to auto-tag."
         } else {
             val top = result.byCategory.entries.sortedByDescending { it.value }.take(3)
-                .joinToString(", ") { "${it.key} (${it.value})" }
-            "Auto-tagged ${result.totalTagged}: $top"
+                .joinToString(", ") { "${'$'}{it.key} (${'$'}{it.value})" }
+            "Auto-tagged ${'$'}{result.totalTagged}: $top"
         }
     }
 
@@ -595,11 +602,100 @@ class ExpenseViewModel(app: Application) : AndroidViewModel(app) {
         _importResult.value = repo.backfillFromInbox(days = 90)
         runMerchantClassification()
         runTransferSweep()
+        refreshCreditCards()
     }
 
     fun importAllFromInbox() = viewModelScope.launch {
         _importResult.value = repo.backfillFromInbox(days = Int.MAX_VALUE)
         runMerchantClassification()
         runTransferSweep()
+        refreshCreditCards()
     }
+
+    // ============================== CREDIT CARDS ============================
+    //
+    // Deliberately kept fully separate from Overall: these transactions carry isExcluded=true
+    // and never appear in totalSpend/totalIncome/categoryRows. A card is auto-registered the
+    // first time its statement SMS arrives (see ExpenseRepository.recordStatement); this section
+    // is read/management UI on top of that, plus the retroactive rematch sweep and manual
+    // add/edit/delete for cards a statement hasn't been seen for yet.
+
+    /** One card's running total for its current OPEN cycle (since its last statement, or since
+     *  it was registered if it has none yet), computed from actual transaction flow. */
+    data class CreditCardSummary(
+        val card: CreditCardEntity,
+        val cycleSpend: Double,
+        val cycleTxnCount: Int,
+        val cycleStart: Long,
+        val lastStatementTotal: Double?
+    )
+
+    private val _creditCardSummaries = MutableStateFlow<List<CreditCardSummary>>(emptyList())
+    val creditCardSummaries: StateFlow<List<CreditCardSummary>> = _creditCardSummaries
+
+    private val _creditCardStatus = MutableStateFlow<String?>(null)
+    val creditCardStatus: StateFlow<String?> = _creditCardStatus
+
+    init {
+        refreshCreditCards()
+    }
+
+    /** Recomputes every card's current-cycle summary. Cheap; call after anything that could
+     *  change card membership or add a transaction (import, rematch, add/edit/delete card). */
+    fun refreshCreditCards() = viewModelScope.launch {
+        _creditCardSummaries.value = cardDao.cardsSync().map { card ->
+            val latest = cardDao.latestStatement(card.id)
+            val since = latest?.statementDate ?: card.createdAt
+            CreditCardSummary(
+                card = card,
+                cycleSpend = cardDao.cycleSpendSync(card.id, since),
+                cycleTxnCount = cardDao.cycleTxnCount(card.id, since),
+                cycleStart = since,
+                lastStatementTotal = latest?.totalDue
+            )
+        }
+    }
+
+    /** Every transaction for one card, most recent first -- for the card's detail screen. */
+    fun txnsForCard(cardId: Long) = cardDao.txnsForCard(cardId)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    fun statementsForCard(cardId: Long) = cardDao.statementsForCard(cardId)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    /** Manual registration, for a card whose first statement hasn't arrived/been imported yet. */
+    fun addCreditCard(name: String, lastFourDigits: String, colorHex: String, emoji: String) =
+        viewModelScope.launch {
+            val digits = lastFourDigits.filter { it.isDigit() }.takeLast(4)
+            if (digits.length == 4 && name.isNotBlank()) {
+                cardDao.insertCard(
+                    CreditCardEntity(name = name.trim(), lastFourDigits = digits, colorHex = colorHex, emoji = emoji)
+                )
+                runCreditCardRematch()
+            }
+        }
+
+    fun updateCreditCard(id: Long, name: String, colorHex: String, emoji: String) = viewModelScope.launch {
+        cardDao.updateCard(id, name.trim(), colorHex, emoji)
+        refreshCreditCards()
+    }
+
+    /** Detaches the card's transactions back into ordinary counted spend, then removes the card. */
+    fun deleteCreditCard(id: Long) = viewModelScope.launch {
+        cardDao.deleteCardCascade(id)
+        refreshCreditCards()
+    }
+
+    /**
+     * Retroactively links existing transactions to cards that weren't registered yet when those
+     * transactions first arrived (e.g. you add a card manually, or its first statement shows up
+     * after some of its purchases were already imported as ordinary spend).
+     */
+    fun runCreditCardRematch() = viewModelScope.launch {
+        val n = repo.rematchCreditCardTransactions()
+        refreshCreditCards()
+        _creditCardStatus.value = if (n == 0) "Nothing new to match." else "Matched $n transaction(s) to your cards."
+    }
+
+    fun clearCreditCardStatus() { _creditCardStatus.value = null }
 }

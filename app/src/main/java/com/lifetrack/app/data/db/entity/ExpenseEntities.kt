@@ -35,7 +35,10 @@ enum class ExclusionSource {
      * spending -- or worse, count it as income, since bank phrasing narrates it from the card's
      * side ("credited" = the card's balance went down, not money entering your life).
      */
-    CARD_BILL_PAYMENT
+    CARD_BILL_PAYMENT,
+
+    /** Belongs to a tracked credit card -- lives in its own separate view, not in Overall. */
+    CREDIT_CARD
 }
 
 /**
@@ -96,6 +99,8 @@ data class TransactionEntity(
     val transferGroupId: String? = null,
     /** Who assigned [categoryId]. See [CategorySource]. */
     val categorySource: CategorySource = CategorySource.NONE,
+    /** Set when this transaction belongs to a tracked credit card. See ExclusionSource.CREDIT_CARD. */
+    val creditCardId: Long? = null,
     val timestamp: Long,
     val source: TxnSource = TxnSource.MANUAL,
     val rawSms: String? = null
