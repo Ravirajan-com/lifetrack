@@ -49,6 +49,7 @@ class BackupRepository private constructor(context: Context) {
                         categoryName = expenseCategories.find { it.id == t.categoryId }?.name,
                         manualOverride = t.manualOverride, isExcluded = t.isExcluded,
                         timestamp = t.timestamp, source = t.source.name,
+                        rawSms = t.rawSms,
                         tags = tagsByTxn[t.id].orEmpty()
                     )
                 },
@@ -133,7 +134,8 @@ class BackupRepository private constructor(context: Context) {
                 manualOverride = t.manualOverride,
                 isExcluded = t.isExcluded,
                 timestamp = t.timestamp,
-                source = runCatching { TxnSource.valueOf(t.source) }.getOrDefault(TxnSource.MANUAL)
+                source = runCatching { TxnSource.valueOf(t.source) }.getOrDefault(TxnSource.MANUAL),
+                rawSms = t.rawSms
             ))
 
             // Re-link tags. A tag named in a transaction but missing from the tags list

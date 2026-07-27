@@ -75,7 +75,14 @@ data class CategoryEntity(
 
 @Entity(
     tableName = "transactions",
-    indices = [Index("categoryId"), Index("timestamp"), Index("matchKey")]
+    indices = [
+        Index("categoryId"),
+        Index("timestamp"),
+        Index("matchKey"),
+        // Prevents duplicates by timestamp and amount, even if rawSms text differs slightly
+        // or is missing (e.g. from an older backup).
+        Index(value = ["timestamp", "amount", "type"], unique = true)
+    ]
 )
 data class TransactionEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,

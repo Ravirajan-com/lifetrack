@@ -49,6 +49,7 @@ data class TransactionEntry(
     val isExcluded: Boolean,
     val timestamp: Long,
     val source: String,
+    val rawSms: String? = null,
     /** Tag names; resolved back to ids on restore. */
     val tags: List<String> = emptyList(),
 )

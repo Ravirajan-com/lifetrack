@@ -26,6 +26,9 @@ data class MonthTotal(
     val txnCount: Int
 )
 
+/** One month's visit count for a merchant, used to draw the history bar chart. */
+data class MonthlyVisitCount(val yearMonth: String, val count: Int)
+
 /** Flattened txn <-> tag edge, so a list screen can look up tags without N queries. */
 data class TxnTagLink(
     val txnId: Long,
@@ -89,11 +92,24 @@ interface ExpenseDao {
     }
 
     // --- transactions ---
-    @Insert
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertTxn(t: TransactionEntity): Long
 
     @Update
     suspend fun updateTxn(t: TransactionEntity)
+
+    @Query("DELETE FROM transactions WHERE id = :id")
+    suspend fun deleteTxn(id: Long)
+
+    @Query("DELETE FROM txn_tags WHERE txnId = :id")
+    suspend fun deleteTagLinksForTxn(id: Long)
+
+    /** Removes a single transaction and its tag links. Does not touch categories or rules. */
+    @androidx.room.Transaction
+    suspend fun deleteTxnCascade(id: Long) {
+        deleteTagLinksForTxn(id)
+        deleteTxn(id)
+    }
 
     @Query("SELECT * FROM transactions WHERE timestamp >= :from AND timestamp < :to ORDER BY timestamp DESC")
     fun txnsBetween(from: Long, to: Long): Flow<List<TransactionEntity>>
@@ -211,15 +227,26 @@ interface ExpenseDao {
     @Query("UPDATE transactions SET note = :note WHERE id = :txnId")
     suspend fun updateTxnNote(txnId: Long, note: String)
 
-    /** Permanently removes one transaction. Categories/rules are untouched. */
-    @Query("DELETE FROM transactions WHERE id = :id")
-    suspend fun deleteTxn(id: Long)
+    // --- merchant history (visits) ------------------------------------------
+    /** How many OTHER transactions (excluding this one) share this merchant/UPI key. Used to
+     *  ask "apply to N other transactions too?" instead of silently rewriting history. */
+    @Query("SELECT COUNT(*) FROM transactions WHERE matchKey = :key AND id != :excludeId")
+    suspend fun countOtherTxnsForMatchKey(key: String, excludeId: Long): Int
 
-    @androidx.room.Transaction
-    suspend fun deleteTxnCascade(txnId: Long) {
-        clearTagsForTxn(txnId)
-        deleteTxn(txnId)
-    }
+    /** Total visits for this merchant, including this transaction -- the badge shown in the UI. */
+    @Query("SELECT COUNT(*) FROM transactions WHERE matchKey = :key")
+    fun countTxnsForMatchKeyFlow(key: String): Flow<Int>
+
+    @Query("SELECT * FROM transactions WHERE matchKey = :key ORDER BY timestamp DESC")
+    fun txnsForMatchKey(key: String): Flow<List<TransactionEntity>>
+
+    @Query(
+        """SELECT strftime('%Y-%m', timestamp / 1000, 'unixepoch', 'localtime') AS yearMonth,
+                  COUNT(*) AS count
+           FROM transactions WHERE matchKey = :key
+           GROUP BY yearMonth ORDER BY yearMonth"""
+    )
+    fun visitsByMonth(key: String): Flow<List<MonthlyVisitCount>>
 
     @Query("SELECT DISTINCT bank FROM transactions WHERE bank IS NOT NULL ORDER BY bank")
     fun allBanks(): Flow<List<String>>

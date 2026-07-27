@@ -35,6 +35,8 @@ import com.lifetrack.app.data.db.entity.CategorySource
 import com.lifetrack.app.data.db.entity.TransactionEntity
 import com.lifetrack.app.data.db.entity.TxnType
 import com.lifetrack.app.ui.common.*
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.launch
 import com.lifetrack.app.ui.theme.Ink
 import java.text.SimpleDateFormat
 import java.time.Instant
@@ -235,10 +237,10 @@ private fun Dashboard(
                         }
                         if (uiState.totalBudget > 0) {
                             Spacer(Modifier.height(16.dp))
-                            val frac = (uiState.totalSpend / uiState.totalBudget).toFloat().coerceIn(0f, 1.2f)
+                            val fraction = (uiState.totalSpend / uiState.totalBudget).toFloat().coerceIn(0f, 1.2f)
                             SlimProgress(
-                                fraction = frac.coerceAtMost(1f),
-                                accent = if (frac > 1f) Ink.danger else Ink.mint
+                                fraction = fraction.coerceAtMost(1f),
+                                accent = if (fraction > 1f) Ink.danger else Ink.mint
                             )
                             Spacer(Modifier.height(8.dp))
                             val balance = (uiState.totalBudget - uiState.totalSpend).coerceAtLeast(0.0)
@@ -359,9 +361,9 @@ private fun Dashboard(
                             }
                             if (budget > 0) {
                                 Spacer(Modifier.height(8.dp))
-                                val frac = (row.spend / budget).toFloat().coerceIn(0f, 1f)
+                                val fraction = (row.spend / budget).toFloat().coerceIn(0f, 1f)
                                 SlimProgress(
-                                    fraction = frac,
+                                    fraction = fraction,
                                     accent = if (row.spend > budget) Ink.danger else parseColor(row.colorHex)
                                 )
                             }
@@ -613,11 +615,25 @@ private fun TransactionDetailsSheet(
     LaunchedEffect(originalTagIds) { selectedTagIds = originalTagIds }
     var showNewTag by remember { mutableStateOf(false) }
 
-    var learnRule by remember { mutableStateOf(true) }
     var isExcluded by remember { mutableStateOf(txn.isExcluded) }
     var note by remember { mutableStateOf(txn.note ?: "") }
     var isEditingNote by remember { mutableStateOf(false) }
     var confirmDeleteTxn by remember { mutableStateOf(false) }
+    var showMerchantHistory by remember { mutableStateOf(false) }
+    // Set only when a category change needs the "apply to N other transactions too?" prompt.
+    var pendingCategoryChange by remember { mutableStateOf<Long?>(null) }
+    var pendingOtherCount by remember { mutableStateOf(0) }
+    val scope = rememberCoroutineScope()
+    val visits by remember(txn.matchKey) { vm.visitCount(txn.matchKey) }.collectAsState(initial = 1)
+
+    // Everything except the category change applies immediately and unconditionally; only
+    // the category needs the "found N other transactions, change those too?" detour.
+    fun finishNonCategoryChanges() {
+        if (isExcluded != txn.isExcluded) vm.toggleExclusion(txn.id, isExcluded)
+        if (note != (txn.note ?: "")) vm.updateNote(txn.id, note)
+        if (selectedTagIds != originalTagIds) vm.setTagsForTxn(txn.id, selectedTagIds.toList())
+        onDone()
+    }
 
     Column(
         Modifier
@@ -626,13 +642,17 @@ private fun TransactionDetailsSheet(
             .verticalScroll(rememberScrollState())
     ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text("Transaction Details", style = MaterialTheme.typography.titleSmall, color = Ink.textDim)
-            Row {
-                IconButton(onClick = { confirmDeleteTxn = true }) {
-                    Icon(Icons.Default.DeleteOutline, "Delete transaction", tint = Ink.danger)
-                }
-                IconButton(onClick = onDone) { Icon(Icons.Default.Close, null) }
+            Text("Transaction Details", style = MaterialTheme.typography.titleSmall, color = Ink.textDim, modifier = Modifier.weight(1f))
+            AssistChip(
+                onClick = { showMerchantHistory = true },
+                label = { Text(if (visits == 1) "1 visit" else "$visits visits") },
+                leadingIcon = { Icon(Icons.Default.BarChart, null, Modifier.size(16.dp)) }
+            )
+            Spacer(Modifier.width(4.dp))
+            IconButton(onClick = { confirmDeleteTxn = true }) {
+                Icon(Icons.Default.DeleteOutline, "Delete transaction", tint = Ink.danger)
             }
+            IconButton(onClick = onDone) { Icon(Icons.Default.Close, null) }
         }
 
         Spacer(Modifier.height(16.dp))
@@ -693,8 +713,6 @@ private fun TransactionDetailsSheet(
 
         Spacer(Modifier.height(12.dp))
 
-        // learnRule was already in state but had no control, so every categorization silently
-        // rewrote history for that merchant. Now it's a choice.
         Spacer(Modifier.height(16.dp))
 
         // Tags: free-form labels, independent of category. A txn can carry several.
@@ -725,22 +743,6 @@ private fun TransactionDetailsSheet(
 
         Spacer(Modifier.height(16.dp))
 
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Switch(checked = learnRule, onCheckedChange = { learnRule = it })
-            Spacer(Modifier.width(12.dp))
-            Column {
-                Text("Remember this merchant", style = MaterialTheme.typography.bodyMedium)
-                Text(
-                    if (learnRule) "Applies to past & future ${txn.merchant} transactions"
-                    else "Changes only this one transaction",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Ink.textDim
-                )
-            }
-        }
-
-        Spacer(Modifier.height(16.dp))
-        
         InkCard(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -795,21 +797,68 @@ private fun TransactionDetailsSheet(
             isExcluded != txn.isExcluded ||
             note != (txn.note ?: "") ||
             selectedTagIds != originalTagIds
+
         Button(
             onClick = {
-                selectedCatId
-                    ?.takeIf { it != txn.categoryId }
-                    ?.let { vm.categorize(txn, it, learnRule) }
-                if (isExcluded != txn.isExcluded) vm.toggleExclusion(txn.id, isExcluded)
-                if (note != (txn.note ?: "")) vm.updateNote(txn.id, note)
-                if (selectedTagIds != originalTagIds) vm.setTagsForTxn(txn.id, selectedTagIds.toList())
-                onDone()
+                val newCatId = selectedCatId
+                if (newCatId != null && newCatId != txn.categoryId) {
+                    scope.launch {
+                        val otherCount = vm.countOtherTxnsForMerchant(txn.matchKey, txn.id)
+                        if (otherCount > 0) {
+                            // Ask before touching the merchant's OTHER transactions. This txn's
+                            // own category is applied only once that choice is made (below).
+                            pendingOtherCount = otherCount
+                            pendingCategoryChange = newCatId
+                        } else {
+                            vm.categorizeAndLearn(txn, newCatId, applyToExisting = false)
+                            finishNonCategoryChanges()
+                        }
+                    }
+                } else {
+                    finishNonCategoryChanges()
+                }
             },
             enabled = dirty,
             modifier = Modifier.fillMaxWidth(),
             colors = ButtonDefaults.buttonColors(containerColor = Ink.mint)
         ) { Text("Save Changes", color = Ink.bg, fontWeight = FontWeight.Bold) }
         Spacer(Modifier.height(32.dp))
+    }
+
+    pendingCategoryChange?.let { catId ->
+        AlertDialog(
+            onDismissRequest = { /* must choose Cancel or Change -- this txn's category is not
+                                    yet applied, so an accidental outside-tap shouldn't lose it */ },
+            title = { Text("Update $pendingOtherCount other transaction${if (pendingOtherCount == 1) "" else "s"}?") },
+            text = {
+                Text(
+                    "Found $pendingOtherCount other transaction${if (pendingOtherCount == 1) "" else "s"} " +
+                        "at ${txn.merchant}. Change ${if (pendingOtherCount == 1) "its" else "their"} category too?"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.categorizeAndLearn(txn, catId, applyToExisting = true)
+                    pendingCategoryChange = null
+                    finishNonCategoryChanges()
+                }) { Text("Change", color = Ink.mint, fontWeight = FontWeight.Bold) }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    // "Cancel" only means "don't touch the OTHERS" -- this transaction's own
+                    // category change still goes through, matching the reference flow exactly.
+                    vm.categorizeAndLearn(txn, catId, applyToExisting = false)
+                    pendingCategoryChange = null
+                    finishNonCategoryChanges()
+                }) { Text("Cancel") }
+            }
+        )
+    }
+
+    if (showMerchantHistory) {
+        ModalBottomSheet(onDismissRequest = { showMerchantHistory = false }) {
+            MerchantHistorySheet(vm, txn.matchKey, txn.merchant) { showMerchantHistory = false }
+        }
     }
 
     if (showNewTag) {
@@ -838,6 +887,78 @@ private fun TransactionDetailsSheet(
             },
             dismissButton = { TextButton(onClick = { confirmDeleteTxn = false }) { Text("Cancel") } }
         )
+    }
+}
+
+/**
+ * Tapping the "N visits" badge opens this: a month-by-month bar chart of how often this
+ * merchant/UPI id has been transacted with, plus the raw list underneath.
+ */
+@Composable
+private fun MerchantHistorySheet(vm: ExpenseViewModel, matchKey: String, merchantName: String, onDone: () -> Unit) {
+    val monthly by remember(matchKey) { vm.visitsByMonth(matchKey) }.collectAsState(initial = emptyList())
+    val txns by remember(matchKey) { vm.txnsForMerchant(matchKey) }.collectAsState(initial = emptyList())
+
+    Column(
+        Modifier
+            .padding(horizontal = 20.dp)
+            .heightIn(max = 560.dp)
+            .verticalScroll(rememberScrollState())
+    ) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(merchantName, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                Text(
+                    "${txns.size} visit${if (txns.size == 1) "" else "s"}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Ink.textDim
+                )
+            }
+            IconButton(onClick = onDone) { Icon(Icons.Default.Close, null) }
+        }
+
+        Spacer(Modifier.height(16.dp))
+
+        if (monthly.isNotEmpty()) {
+            InkCard(Modifier.fillMaxWidth()) {
+                BarChart(
+                    bars = monthly.map { Bar(it.yearMonth.takeLast(2), it.count.toDouble()) },
+                    color = Ink.mint,
+                    modifier = Modifier.padding(12.dp)
+                )
+            }
+            Spacer(Modifier.height(20.dp))
+        }
+
+        Eyebrow("All transactions")
+        if (txns.isEmpty()) {
+            Text("Nothing yet.", style = MaterialTheme.typography.labelSmall, color = Ink.textDim)
+        } else {
+            Column {
+                txns.forEach { t ->
+                    Row(
+                        Modifier.fillMaxWidth().padding(vertical = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column {
+                            Text(
+                                SimpleDateFormat("dd MMM yyyy, HH:mm", Locale.getDefault()).format(Date(t.timestamp)),
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            if (t.isExcluded) {
+                                Text("Excluded", style = MaterialTheme.typography.labelSmall, color = Ink.textDim)
+                            }
+                        }
+                        Text(
+                            "₹%,.0f".format(t.amount),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (t.type == TxnType.CREDIT) Ink.mint else Ink.text
+                        )
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(24.dp))
     }
 }
 
@@ -970,10 +1091,12 @@ private fun CreditCardsTab(vm: ExpenseViewModel) {
     }
 
     openCardId?.let { id ->
-        val summary = summaries.firstOrNull { it.card.id == id }
-        if (summary != null) {
-            ModalBottomSheet(onDismissRequest = { openCardId = null }) {
-                CreditCardDetailSheet(vm, summary) { openCardId = null }
+        key(id) {
+            val summary = summaries.firstOrNull { it.card.id == id }
+            if (summary != null) {
+                ModalBottomSheet(onDismissRequest = { openCardId = null }) {
+                    CreditCardDetailSheet(vm, summary) { openCardId = null }
+                }
             }
         }
     }
@@ -1434,7 +1557,7 @@ private fun AddCategorySheet(vm: ExpenseViewModel, onDone: () -> Unit) {
     var kind by remember { mutableStateOf(com.lifetrack.app.data.db.entity.CategoryKind.EXPENSE) }
     val isExpense = kind == com.lifetrack.app.data.db.entity.CategoryKind.EXPENSE
 
-    val colors = listOf("#FF7043", "#66BB6A", "#42A5F5", "#AB47BC", "#FFA726", "#EC407A", "#26A69A", "#78909C")
+    val palette = listOf("#FF7043", "#66BB6A", "#42A5F5", "#AB47BC", "#FFA726", "#EC407A", "#26A69A", "#78909C")
 
     Column(
         Modifier
@@ -1489,7 +1612,7 @@ private fun AddCategorySheet(vm: ExpenseViewModel, onDone: () -> Unit) {
         
         Eyebrow("Accent Color", Modifier.padding(top = 20.dp, bottom = 12.dp))
         LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            items(colors) { c ->
+            items(palette) { c ->
                 Box(
                     Modifier
                         .size(40.dp)
@@ -2014,11 +2137,11 @@ private fun YearTab(vm: ExpenseViewModel, onOpenArchive: () -> Unit) {
                                 verticalArrangement = Arrangement.Bottom,
                                 modifier = Modifier.weight(1f)
                             ) {
-                                val frac = (bar.spend / peak).toFloat().coerceIn(0f, 1f)
+                                val fraction = (bar.spend / peak).toFloat().coerceIn(0f, 1f)
                                 Box(
                                     Modifier
                                         .width(14.dp)
-                                        .height((4 + 106 * frac).dp)
+                                        .height((4 + 106 * fraction).dp)
                                         .clip(MaterialTheme.shapes.extraSmall)
                                         .background(
                                             when {
@@ -2210,7 +2333,6 @@ private fun ArchiveSheet(vm: ExpenseViewModel, onDone: () -> Unit) {
         Spacer(Modifier.height(32.dp))
     }
 }
-
 
 private fun String.takeIn(predicate: (String) -> Boolean): String? {
     return if (predicate(this)) this else null

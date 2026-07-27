@@ -95,6 +95,24 @@ class ExpenseRepository private constructor(private val context: Context) {
     }
 
     /**
+     * User categorizes a txn, with a merchant-rule confirmation flow instead of an always-on
+     * toggle.
+     *
+     * The rule (matchKey -> category) is ALWAYS created, so future incoming transactions from
+     * this merchant auto-categorize -- that's forward-looking and non-destructive, no reason to
+     * gate it behind a confirmation. Only rewriting the merchant's OTHER, already-existing
+     * transactions is destructive enough to ask about, which is what [applyToExisting] controls.
+     * The current transaction's own category is always set directly, regardless.
+     */
+    suspend fun categorizeAndLearn(txn: TransactionEntity, categoryId: Long, applyToExisting: Boolean) {
+        dao.upsertRule(MerchantRuleEntity(matchKey = txn.matchKey, categoryId = categoryId))
+        dao.overrideTxnCategory(txn.id, categoryId)
+        if (applyToExisting) {
+            dao.applyRuleToExisting(txn.matchKey, categoryId)
+        }
+    }
+
+    /**
      * User categorizes a txn.
      * @param learnRule true  -> "all from this merchant/UPI = this category" (writes rule,
      *                          re-categorizes past txns, auto-applies to future ones)

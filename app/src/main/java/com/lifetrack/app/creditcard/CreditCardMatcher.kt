@@ -39,9 +39,10 @@ data class StatementInfo(
  */
 object CreditCardMatcher {
 
-    // Matches "Credit Card XX1234", "Card xx4321", "Card ending 4321", "Card ending with XX0121".
+    // Matches "Credit Card XX1234", "Card xx4321", "Card ending 4321", "Card ending with XX0121",
+    // and generic "A/c *8061" phrasings often used for cards.
     private val cardRefRegex = Regex(
-        """(?:credit\s*card|card)\b[^.\n]{0,20}?(?:[Xx*]{1,}(\d{3,6})|ending\s+(?:with\s+)?[Xx*]{0,4}\s*(\d{3,6}))""",
+        """(?:credit\s*card|card|a/?c)\b[^.\n]{0,20}?(?:[Xx*]{1,}(\d{3,6})|ending\s+(?:with\s+)?[Xx*]{0,4}\s*(\d{3,6}))""",
         RegexOption.IGNORE_CASE
     )
 

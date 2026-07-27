@@ -53,7 +53,7 @@ interface CreditCardDao {
     }
 
     // --- statements ---
-    @Insert
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertStatement(s: CreditCardStatementEntity): Long
 
     @Query("SELECT * FROM credit_card_statements WHERE cardId = :cardId ORDER BY statementDate DESC")

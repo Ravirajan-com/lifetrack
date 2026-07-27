@@ -35,7 +35,7 @@ import com.lifetrack.app.data.db.entity.WorkoutCategoryEntity
         GoalEntity::class, GoalCompletionEntity::class,
         CreditCardEntity::class, CreditCardStatementEntity::class
     ],
-    version = 8,
+    version = 10,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -159,6 +159,59 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v8 -> v9: Transaction deduplication. Adds a unique index on (rawSms, timestamp)
+         * to prevent duplicate ingestion during inbox backfills or data restores.
+         */
+        private val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS `index_transactions_rawSms_timestamp` " +
+                        "ON `transactions` (`rawSms`, `timestamp`)"
+                )
+            }
+        }
+
+        /**
+         * v9 -> v10: Robust deduplication. Switches the unique index to (timestamp, amount, type)
+         * to catch duplicates even if rawSms is missing (legacy backup) or slightly different.
+         * Cleans up existing duplicates before creating the index.
+         */
+        private val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // 1. Remove the old, weaker index.
+                db.execSQL("DROP INDEX IF EXISTS `index_transactions_rawSms_timestamp`")
+                
+                // 2. Cleanup existing duplicates: keep the row with the most info (prefer RULE/USER source).
+                // If info is equal, keep the one with the smallest id.
+                db.execSQL("""
+                    DELETE FROM transactions 
+                    WHERE id NOT IN (
+                        SELECT id FROM (
+                            SELECT id, ROW_NUMBER() OVER (
+                                PARTITION BY timestamp, amount, type 
+                                ORDER BY 
+                                    CASE categorySource 
+                                        WHEN 'USER' THEN 1 
+                                        WHEN 'RULE' THEN 2 
+                                        WHEN 'KEYWORD_AUTO' THEN 3 
+                                        ELSE 4 
+                                    END ASC,
+                                    id ASC
+                            ) as rn
+                            FROM transactions
+                        ) WHERE rn = 1
+                    )
+                """.trimIndent())
+
+                // 3. Create the new, stronger unique index.
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS `index_transactions_timestamp_amount_type` " +
+                        "ON `transactions` (`timestamp`, `amount`, `type`)"
+                )
+            }
+        }
+
         @Volatile private var instance: AppDatabase? = null
 
         fun get(context: Context): AppDatabase =
@@ -166,7 +219,7 @@ abstract class AppDatabase : RoomDatabase() {
                 instance ?: Room.databaseBuilder(
                     context.applicationContext, AppDatabase::class.java, "lifetrack.db"
                 )
-                    .addMigrations(MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
+                    .addMigrations(MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10)
                     // Safety net while you're still iterating on the schema. Room prefers a real
                     // migration when one exists and only wipes when no path is found.
                     // DELETE THIS LINE before you ship / start keeping data you care about.

@@ -453,6 +453,23 @@ class ExpenseViewModel(app: Application) : AndroidViewModel(app) {
     fun categorize(txn: TransactionEntity, categoryId: Long, learnRule: Boolean) =
         viewModelScope.launch { repo.categorize(txn, categoryId, learnRule) }
 
+    /** How many OTHER transactions share this merchant -- used to decide whether the
+     *  "apply to N other transactions too?" confirmation is worth showing at all. */
+    suspend fun countOtherTxnsForMerchant(matchKey: String, excludeTxnId: Long): Int =
+        dao.countOtherTxnsForMatchKey(matchKey, excludeTxnId)
+
+    /** Sets this transaction's category, learns the merchant rule for future SMS, and only
+     *  rewrites the merchant's other existing transactions if [applyToExisting] is confirmed. */
+    fun categorizeAndLearn(txn: TransactionEntity, categoryId: Long, applyToExisting: Boolean) =
+        viewModelScope.launch { repo.categorizeAndLearn(txn, categoryId, applyToExisting) }
+
+    /** Live visit count for a merchant, including the transaction currently being viewed. */
+    fun visitCount(matchKey: String) = dao.countTxnsForMatchKeyFlow(matchKey)
+
+    fun txnsForMerchant(matchKey: String) = dao.txnsForMatchKey(matchKey)
+
+    fun visitsByMonth(matchKey: String) = dao.visitsByMonth(matchKey)
+
     fun toggleExclusion(txnId: Long, excluded: Boolean) =
         viewModelScope.launch { dao.setUserExclusion(txnId, excluded) }
 
@@ -585,8 +602,8 @@ class ExpenseViewModel(app: Application) : AndroidViewModel(app) {
             "Nothing new to auto-tag."
         } else {
             val top = result.byCategory.entries.sortedByDescending { it.value }.take(3)
-                .joinToString(", ") { "${'$'}{it.key} (${'$'}{it.value})" }
-            "Auto-tagged ${'$'}{result.totalTagged}: $top"
+                .joinToString(", ") { "${it.key} (${it.value})" }
+            "Auto-tagged ${result.totalTagged}: $top"
         }
     }
 
@@ -656,12 +673,20 @@ class ExpenseViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Every transaction for one card, most recent first -- for the card's detail screen. */
-    fun txnsForCard(cardId: Long) = cardDao.txnsForCard(cardId)
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    private val txnFlows = mutableMapOf<Long, StateFlow<List<TransactionEntity>>>()
+    private val statementFlows = mutableMapOf<Long, StateFlow<List<com.lifetrack.app.creditcard.CreditCardStatementEntity>>>()
 
-    fun statementsForCard(cardId: Long) = cardDao.statementsForCard(cardId)
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    /** Every transaction for one card, most recent first -- for the card's detail screen.
+     *  Cached to prevent UI "shaking" from re-creating flows on every recomposition. */
+    fun txnsForCard(cardId: Long): StateFlow<List<TransactionEntity>> = txnFlows.getOrPut(cardId) {
+        cardDao.txnsForCard(cardId)
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    }
+
+    fun statementsForCard(cardId: Long): StateFlow<List<com.lifetrack.app.creditcard.CreditCardStatementEntity>> = statementFlows.getOrPut(cardId) {
+        cardDao.statementsForCard(cardId)
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    }
 
     /** Manual registration, for a card whose first statement hasn't arrived/been imported yet. */
     fun addCreditCard(name: String, lastFourDigits: String, colorHex: String, emoji: String) =
