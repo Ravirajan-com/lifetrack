@@ -151,6 +151,10 @@ interface ExpenseDao {
     @Query("SELECT * FROM transactions")
     suspend fun allTxnsSync(): List<TransactionEntity>
 
+    /** Find a txn id by its unique fingerprint -- used during restore to re-link tags. */
+    @Query("SELECT id FROM transactions WHERE timestamp = :ts AND amount = :amt AND type = :type LIMIT 1")
+    suspend fun getTxnIdByFingerprint(ts: Long, amt: Double, type: com.lifetrack.app.data.db.entity.TxnType): Long?
+
     /** Assign category to one txn only (manual override). */
     @Query("UPDATE transactions SET categoryId = :catId, manualOverride = 1, categorySource = 'USER' WHERE id = :txnId")
     suspend fun overrideTxnCategory(txnId: Long, catId: Long)

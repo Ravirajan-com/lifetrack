@@ -51,6 +51,9 @@ data class TransactionEntry(
     val timestamp: Long,
     val source: String,
     val rawSms: String? = null,
+    val categorySource: String = "NONE",
+    val exclusionSource: String = "NONE",
+    val transferGroupId: String? = null,
     /** Tag names; resolved back to ids on restore. */
     val tags: List<String> = emptyList(),
 )

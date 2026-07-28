@@ -53,6 +53,9 @@ class BackupRepository private constructor(context: Context) {
                         manualOverride = t.manualOverride, isExcluded = t.isExcluded,
                         timestamp = t.timestamp, source = t.source.name,
                         rawSms = t.rawSms,
+                        categorySource = t.categorySource.name,
+                        exclusionSource = t.exclusionSource.name,
+                        transferGroupId = t.transferGroupId,
                         tags = tagsByTxn[t.id].orEmpty()
                     )
                 },
@@ -151,10 +154,11 @@ class BackupRepository private constructor(context: Context) {
         
         for (t in backup.expenses.transactions) {
             val cardId = t.rawSms?.let { com.lifetrack.app.creditcard.CreditCardMatcher.extractLast4(it) }?.let { cardMap[it] }
-            
-            expenseDao.insertTxn(TransactionEntity(
+            val txnType = runCatching { TxnType.valueOf(t.type) }.getOrDefault(TxnType.DEBIT)
+
+            val txn = TransactionEntity(
                 amount = t.amount,
-                type = runCatching { TxnType.valueOf(t.type) }.getOrDefault(TxnType.DEBIT),
+                type = txnType,
                 merchant = t.merchant,
                 matchKey = t.matchKey,
                 upiId = t.upiId,
@@ -166,8 +170,26 @@ class BackupRepository private constructor(context: Context) {
                 timestamp = t.timestamp,
                 source = runCatching { TxnSource.valueOf(t.source) }.getOrDefault(TxnSource.MANUAL),
                 rawSms = t.rawSms,
-                creditCardId = cardId
-            ))
+                creditCardId = cardId,
+                categorySource = runCatching { CategorySource.valueOf(t.categorySource) }.getOrDefault(CategorySource.NONE),
+                exclusionSource = runCatching { ExclusionSource.valueOf(t.exclusionSource) }.getOrDefault(ExclusionSource.NONE),
+                transferGroupId = t.transferGroupId
+            )
+
+            expenseDao.insertTxn(txn)
+
+            // Re-link tags. Find the transaction ID (either new or existing) by fingerprint.
+            val txnId = expenseDao.getTxnIdByFingerprint(t.timestamp, t.amount, txnType)
+            if (txnId != null) {
+                for (name in t.tags) {
+                    val tagId = tagMap[name]
+                        ?: expenseDao.insertTag(TagEntity(name = name)).takeIf { it > 0L }
+                        ?: expenseDao.tagIdByName(name)
+                        ?: continue
+                    tagMap[name] = tagId
+                    expenseDao.linkTag(TxnTagCrossRef(txnId = txnId, tagId = tagId))
+                }
+            }
         }
         
         for (r in backup.expenses.rules) {
@@ -208,7 +230,7 @@ class BackupRepository private constructor(context: Context) {
             val exerciseId = exerciseMap[sl.categoryName to sl.exerciseName]
             if (sessionId != null && exerciseId != null) {
                 gymDao.insertSet(
-                    com.lifetrack.app.data.db.entity.SetLogEntity(
+                    SetLogEntity(
                         sessionId = sessionId, 
                         exerciseId = exerciseId, 
                         setNumber = sl.setNumber, 

@@ -59,9 +59,9 @@ object SmsParser {
     // ------------------------------------------------------------------ structural evidence
     // A masked account number or card reference: "A/c XX1234", "a/c no 1234", "Card xx4321",
     // "card ending 4321", "account XX1234", "A/C *8061" (single-character masking -- see the
-    // ROUND 3 note above; this is the fix for the dominant real bug).
+    // ROUND 3 note above; this is the fix for the dominant real bug), and bare-digit "Card 6902".
     private val accountRefRegex = Regex(
-        """\b(?:a/?c|account|card)\b[^.\n]{0,20}?(?:[xX*]{1,}\d{2,6}|ending\s+\d{2,6}|no\.?\s*\d{4,})""",
+        """\b(?:a/?c|account|card)\b[^.\n]{0,20}?(?:[xX*]{1,}\d{2,6}|ending\s+\d{2,6}|no\.?\s*\d{4,}|\d{3,6}\b)""",
         RegexOption.IGNORE_CASE
     )
     // "UPI Ref 12345", "Ref No 12345" AND the bare "UPI:12345" form some banks use with no

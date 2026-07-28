@@ -40,9 +40,9 @@ data class StatementInfo(
 object CreditCardMatcher {
 
     // Matches "Credit Card XX1234", "Card xx4321", "Card ending 4321", "Card ending with XX0121",
-    // and generic "A/c *8061" phrasings often used for cards.
+    // generic "A/c *8061" phrasings, and bare-digit "Card 6902" patterns.
     private val cardRefRegex = Regex(
-        """(?:credit\s*card|card|a/?c)\b[^.\n]{0,20}?(?:[Xx*]{1,}(\d{3,6})|ending\s+(?:with\s+)?[Xx*]{0,4}\s*(\d{3,6}))""",
+        """(?:credit\s*card|card|a/?c)\b[^.\n]{0,20}?(?:[Xx*]{1,}(\d{3,6})|ending\s+(?:with\s+)?[Xx*]{0,4}\s*(\d{3,6})|\b(\d{3,6})\b)""",
         RegexOption.IGNORE_CASE
     )
 
@@ -60,7 +60,7 @@ object CreditCardMatcher {
     /** The last 4 digits of whatever masked card this message references, if any. */
     fun extractLast4(body: String): String? {
         val m = cardRefRegex.find(body) ?: return null
-        val digits = m.groupValues[1].ifEmpty { m.groupValues[2] }
+        val digits = m.groupValues[1].ifEmpty { m.groupValues[2] }.ifEmpty { m.groupValues[3] }
         return digits.takeLast(4).ifEmpty { null }
     }
 
