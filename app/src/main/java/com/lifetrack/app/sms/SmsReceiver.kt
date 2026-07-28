@@ -19,12 +19,13 @@ class SmsReceiver : BroadcastReceiver() {
         val body = messages.joinToString("") { it.messageBody ?: "" }
         val ts = messages.firstOrNull()?.timestampMillis ?: System.currentTimeMillis()
 
-        val txn = SmsParser.parse(body, ts) ?: return
-
         val pending = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                ExpenseRepository.get(context).ingestSmsTransaction(txn)
+                // processSms handles both ordinary transactions AND credit-card statement
+                // events (which aren't transactions at all, but still need recording -- see
+                // ExpenseRepository.processSms).
+                ExpenseRepository.get(context).processSms(body, ts)
             } finally {
                 pending.finish()
             }

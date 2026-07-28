@@ -18,6 +18,9 @@ data class CategorySpend(val categoryId: Long?, val name: String?, val colorHex:
 data class BankSpend(val name: String, val total: Double)
 data class DailySpend(val epochDay: Long, val total: Double)
 
+/** One bucket of the Trends chart -- a day, week, or month, per the caller's chosen format. */
+data class PeriodTotals(val period: String, val spend: Double, val income: Double)
+
 /** One month of live totals, computed from raw transactions. */
 data class MonthTotal(
     val yearMonth: String,
@@ -25,6 +28,9 @@ data class MonthTotal(
     val income: Double,
     val txnCount: Int
 )
+
+/** One month's visit count for a merchant, used to draw the history bar chart. */
+data class MonthlyVisitCount(val yearMonth: String, val count: Int, val spend: Double)
 
 /** Flattened txn <-> tag edge, so a list screen can look up tags without N queries. */
 data class TxnTagLink(
@@ -38,8 +44,18 @@ data class TxnTagLink(
 interface ExpenseDao {
 
     // --- categories ---
+    // Used by manual "new category" and by backup/restore, which both supply a specific id and
+    // rely on REPLACE-by-primary-key semantics (e.g. restoring a backup's own ids intact).
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertCategory(c: CategoryEntity): Long
+
+    // Used only by getOrCreateCategory below. IGNORE (not REPLACE) is required here: with the
+    // (name, kind) unique index now in place, REPLACE would delete-then-reinsert on a conflict,
+    // silently changing the row's id out from under any transaction or merchant rule already
+    // pointing at it. IGNORE simply no-ops on conflict, and getOrCreateCategory re-looks-up the
+    // existing row's real id in that case.
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertCategoryIfAbsent(c: CategoryEntity): Long
 
     @Query("SELECT * FROM categories ORDER BY name")
     fun categories(): Flow<List<CategoryEntity>>
@@ -56,6 +72,12 @@ interface ExpenseDao {
     /**
      * Finds an existing category by (name, kind) or creates it. Used by the merchant classifier
      * so re-running it never produces duplicate "Food & Dining" categories.
+     *
+     * Race-safe: two independent callers racing to create the same (name, kind) at app startup
+     * (e.g. default-category seeding and merchant classification both deciding "Bills" doesn't
+     * exist yet) can no longer both win -- the DB's unique index plus IGNORE means whichever
+     * insert loses the race gets ignored, not silently duplicated, and the relookup below finds
+     * the row the winner created.
      */
     @androidx.room.Transaction
     suspend fun getOrCreateCategory(
@@ -65,7 +87,8 @@ interface ExpenseDao {
         kind: CategoryKind = CategoryKind.EXPENSE
     ): Long {
         categoryByNameAndKind(name, kind)?.let { return it.id }
-        return upsertCategory(CategoryEntity(name = name, colorHex = colorHex, iconEmoji = emoji, kind = kind))
+        val id = insertCategoryIfAbsent(CategoryEntity(name = name, colorHex = colorHex, iconEmoji = emoji, kind = kind))
+        return if (id > 0) id else (categoryByNameAndKind(name, kind)?.id ?: -1L)
     }
 
     @Query("DELETE FROM categories WHERE id = :id")
@@ -89,11 +112,24 @@ interface ExpenseDao {
     }
 
     // --- transactions ---
-    @Insert
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertTxn(t: TransactionEntity): Long
 
     @Update
     suspend fun updateTxn(t: TransactionEntity)
+
+    @Query("DELETE FROM transactions WHERE id = :id")
+    suspend fun deleteTxn(id: Long)
+
+    @Query("DELETE FROM txn_tags WHERE txnId = :id")
+    suspend fun deleteTagLinksForTxn(id: Long)
+
+    /** Removes a single transaction and its tag links. Does not touch categories or rules. */
+    @androidx.room.Transaction
+    suspend fun deleteTxnCascade(id: Long) {
+        deleteTagLinksForTxn(id)
+        deleteTxn(id)
+    }
 
     @Query("SELECT * FROM transactions WHERE timestamp >= :from AND timestamp < :to ORDER BY timestamp DESC")
     fun txnsBetween(from: Long, to: Long): Flow<List<TransactionEntity>>
@@ -187,6 +223,52 @@ interface ExpenseDao {
     )
     fun dailySpend(from: Long, to: Long): Flow<List<DailySpend>>
 
+    /**
+     * Spend and income grouped by day, week, or month, per [fmt] -- an SQLite strftime format
+     * string ("%Y-%m-%d", "%Y-%W", or "%Y-%m") chosen by the caller depending on which
+     * granularity the Trends page is showing. Same 'localtime' correction as dailySpend above:
+     * grouping in UTC would push pre-05:30-IST transactions onto the wrong calendar day/week/month.
+     */
+    @Query(
+        """SELECT strftime(:fmt, t.timestamp / 1000, 'unixepoch', 'localtime') AS period,
+                  SUM(CASE WHEN t.type = 'DEBIT'  AND t.isExcluded = 0 THEN t.amount ELSE 0 END) AS spend,
+                  SUM(CASE WHEN t.type = 'CREDIT' AND t.isExcluded = 0 THEN t.amount ELSE 0 END) AS income
+           FROM transactions t
+           WHERE t.timestamp >= :from AND t.timestamp < :to
+           GROUP BY period ORDER BY period"""
+    )
+    fun trendsByPeriod(fmt: String, from: Long, to: Long): Flow<List<PeriodTotals>>
+
+    /**
+     * Same as trendsByPeriod, but for WEEK: groups by the Monday of each week rather than a
+     * SQLite week-number format, specifically so the returned period string is a plain ISO date
+     * ("2026-07-21") that Kotlin's LocalDate.parse can read back exactly like DAY's period does --
+     * SQLite's own %W week-number format doesn't map back to an unambiguous date on its own.
+     * The expression: weekday(0=Sun..6=Sat) converted to a Monday-based offset, subtracted from
+     * the date, lands on that week's Monday regardless of which day of the week a transaction fell on.
+     */
+    @Query(
+        """SELECT date(
+                      t.timestamp / 1000, 'unixepoch', 'localtime',
+                      '-' || ((CAST(strftime('%w', t.timestamp / 1000, 'unixepoch', 'localtime') AS INTEGER) + 6) % 7) || ' days'
+                  ) AS period,
+                  SUM(CASE WHEN t.type = 'DEBIT'  AND t.isExcluded = 0 THEN t.amount ELSE 0 END) AS spend,
+                  SUM(CASE WHEN t.type = 'CREDIT' AND t.isExcluded = 0 THEN t.amount ELSE 0 END) AS income
+           FROM transactions t
+           WHERE t.timestamp >= :from AND t.timestamp < :to
+           GROUP BY period ORDER BY period"""
+    )
+    fun trendsByWeek(from: Long, to: Long): Flow<List<PeriodTotals>>
+
+    /**
+     * Every transaction in an exact time range, most recent first -- backs the Trends page's
+     * "Review <period>" drill-down. The caller computes [from]/[to] as the real millisecond
+     * boundaries of whichever day/week/month was tapped (java.time, not a parsed period string),
+     * so this stays a plain, exact range query regardless of granularity.
+     */
+    @Query("SELECT * FROM transactions WHERE timestamp >= :from AND timestamp < :to ORDER BY timestamp DESC")
+    fun txnsInRange(from: Long, to: Long): Flow<List<TransactionEntity>>
+
     @Query("SELECT COALESCE(SUM(amount),0) FROM transactions WHERE type='DEBIT' AND isExcluded = 0 AND timestamp >= :from AND timestamp < :to")
     fun totalSpend(from: Long, to: Long): Flow<Double>
 
@@ -210,6 +292,28 @@ interface ExpenseDao {
 
     @Query("UPDATE transactions SET note = :note WHERE id = :txnId")
     suspend fun updateTxnNote(txnId: Long, note: String)
+
+    // --- merchant history (visits) ------------------------------------------
+    /** How many OTHER transactions (excluding this one) share this merchant/UPI key. Used to
+     *  ask "apply to N other transactions too?" instead of silently rewriting history. */
+    @Query("SELECT COUNT(*) FROM transactions WHERE matchKey = :key AND id != :excludeId")
+    suspend fun countOtherTxnsForMatchKey(key: String, excludeId: Long): Int
+
+    /** Total visits for this merchant, including this transaction -- the badge shown in the UI. */
+    @Query("SELECT COUNT(*) FROM transactions WHERE matchKey = :key")
+    fun countTxnsForMatchKeyFlow(key: String): Flow<Int>
+
+    @Query("SELECT * FROM transactions WHERE matchKey = :key ORDER BY timestamp DESC")
+    fun txnsForMatchKey(key: String): Flow<List<TransactionEntity>>
+
+    @Query(
+        """SELECT strftime('%Y-%m', timestamp / 1000, 'unixepoch', 'localtime') AS yearMonth,
+                  COUNT(*) AS count,
+                  SUM(CASE WHEN type = 'DEBIT' THEN amount ELSE 0 END) AS spend
+           FROM transactions WHERE matchKey = :key
+           GROUP BY yearMonth ORDER BY yearMonth"""
+    )
+    fun visitsByMonth(key: String): Flow<List<MonthlyVisitCount>>
 
     @Query("SELECT DISTINCT bank FROM transactions WHERE bank IS NOT NULL ORDER BY bank")
     fun allBanks(): Flow<List<String>>

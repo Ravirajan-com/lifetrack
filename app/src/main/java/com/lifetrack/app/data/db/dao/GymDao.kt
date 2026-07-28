@@ -20,13 +20,26 @@ data class SessionWithCategory(val sessionId: Long, val categoryName: String, va
 interface GymDao {
 
     // --- setup ---
-    @Insert suspend fun insertCategory(c: WorkoutCategoryEntity): Long
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertCategory(c: WorkoutCategoryEntity): Long
+
+    @Update suspend fun updateCategory(c: WorkoutCategoryEntity)
+
+    @Query("SELECT * FROM workout_categories WHERE name = :name LIMIT 1")
+    suspend fun categoryByName(name: String): WorkoutCategoryEntity?
+
     @Query("SELECT * FROM workout_categories ORDER BY name") fun categories(): Flow<List<WorkoutCategoryEntity>>
     @Query("SELECT * FROM workout_categories") suspend fun allCategoriesSync(): List<WorkoutCategoryEntity>
     @Query("DELETE FROM workout_categories WHERE id = :id") suspend fun deleteCategory(id: Long)
 
-    @Insert suspend fun insertExercise(e: ExerciseEntity): Long
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertExercise(e: ExerciseEntity): Long
+
     @Update suspend fun updateExercise(e: ExerciseEntity)
+
+    @Query("SELECT * FROM exercises WHERE categoryId = :catId AND name = :name LIMIT 1")
+    suspend fun exerciseByName(catId: Long, name: String): ExerciseEntity?
+
     @Query("SELECT * FROM exercises WHERE categoryId = :catId") fun exercisesOf(catId: Long): Flow<List<ExerciseEntity>>
     @Query("SELECT * FROM exercises") suspend fun allExercisesSync(): List<ExerciseEntity>
     @Query("DELETE FROM exercises WHERE id = :id") suspend fun deleteExercise(id: Long)

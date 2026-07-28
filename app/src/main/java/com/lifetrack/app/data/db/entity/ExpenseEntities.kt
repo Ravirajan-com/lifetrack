@@ -35,7 +35,10 @@ enum class ExclusionSource {
      * spending -- or worse, count it as income, since bank phrasing narrates it from the card's
      * side ("credited" = the card's balance went down, not money entering your life).
      */
-    CARD_BILL_PAYMENT
+    CARD_BILL_PAYMENT,
+
+    /** Belongs to a tracked credit card -- lives in its own separate view, not in Overall. */
+    CREDIT_CARD
 }
 
 /**
@@ -57,7 +60,7 @@ enum class CategorySource {
     KEYWORD_AUTO
 }
 
-@Entity(tableName = "categories")
+@Entity(tableName = "categories", indices = [Index(value = ["name", "kind"], unique = true)])
 data class CategoryEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val name: String,
@@ -72,7 +75,14 @@ data class CategoryEntity(
 
 @Entity(
     tableName = "transactions",
-    indices = [Index("categoryId"), Index("timestamp"), Index("matchKey")]
+    indices = [
+        Index("categoryId"),
+        Index("timestamp"),
+        Index("matchKey"),
+        // Prevents duplicates by timestamp and amount, even if rawSms text differs slightly
+        // or is missing (e.g. from an older backup).
+        Index(value = ["timestamp", "amount", "type"], unique = true)
+    ]
 )
 data class TransactionEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
@@ -96,6 +106,8 @@ data class TransactionEntity(
     val transferGroupId: String? = null,
     /** Who assigned [categoryId]. See [CategorySource]. */
     val categorySource: CategorySource = CategorySource.NONE,
+    /** Set when this transaction belongs to a tracked credit card. See ExclusionSource.CREDIT_CARD. */
+    val creditCardId: Long? = null,
     val timestamp: Long,
     val source: TxnSource = TxnSource.MANUAL,
     val rawSms: String? = null

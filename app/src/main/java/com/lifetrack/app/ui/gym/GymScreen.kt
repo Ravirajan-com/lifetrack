@@ -6,8 +6,10 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -19,6 +21,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.lifetrack.app.data.db.dao.CategoryFrequency
 import com.lifetrack.app.data.db.dao.PersonalBest
@@ -271,8 +275,7 @@ private fun TrainingTab(vm: GymViewModel) {
                                 showCategoryPicker = false
                             }
                             .padding(vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
+                        verticalAlignment = Alignment.CenterVertically) {
                         Box(Modifier.size(12.dp).clip(CircleShape).background(parseColor(cat.colorHex)))
                         Spacer(Modifier.width(12.dp))
                         Text(cat.name, style = MaterialTheme.typography.bodyLarge)
@@ -373,6 +376,7 @@ private fun ManageTab(vm: GymViewModel) {
     val categories by vm.categories.collectAsState()
     var showAddCat by remember { mutableStateOf(false) }
     var managingCat by remember { mutableStateOf<WorkoutCategoryEntity?>(null) }
+    var editingCat by remember { mutableStateOf<WorkoutCategoryEntity?>(null) }
 
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         item {
@@ -388,6 +392,9 @@ private fun ManageTab(vm: GymViewModel) {
                     Box(Modifier.size(12.dp).clip(CircleShape).background(parseColor(cat.colorHex)))
                     Spacer(Modifier.width(16.dp))
                     Text(cat.name, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+                    IconButton(onClick = { editingCat = cat }) {
+                        Icon(Icons.Default.Edit, null, tint = Ink.textDim, modifier = Modifier.size(20.dp))
+                    }
                     Icon(Icons.Default.ChevronRight, null, tint = Ink.textDim)
                 }
             }
@@ -420,8 +427,57 @@ private fun ManageTab(vm: GymViewModel) {
         }
     }
 
+    editingCat?.let { cat ->
+        var name by remember { mutableStateOf(cat.name) }
+        val colors = listOf("#FF7043", "#66BB6A", "#42A5F5", "#AB47BC", "#FFA726", "#EC407A", "#26A69A", "#78909C")
+        var selectedColor by remember { mutableStateOf(cat.colorHex) }
+        var confirmDelete by remember { mutableStateOf(false) }
+
+        ModalBottomSheet(onDismissRequest = { editingCat = null }) {
+            Column(Modifier.padding(20.dp)) {
+                Text("Edit Category", style = MaterialTheme.typography.titleLarge)
+                OutlinedTextField(name, { name = it }, label = { Text("Name") }, modifier = Modifier.fillMaxWidth())
+                Spacer(Modifier.height(16.dp))
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(colors) { c ->
+                        Box(Modifier.size(36.dp).clip(CircleShape).background(parseColor(c)).clickable { selectedColor = c }) {
+                            if (c == selectedColor) Icon(Icons.Default.Check, null, Modifier.align(Alignment.Center), tint = Color.White)
+                        }
+                    }
+                }
+                Spacer(Modifier.height(24.dp))
+                Button(
+                    onClick = { vm.updateCategory(cat.id, name, selectedColor); editingCat = null },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(containerColor = Ink.ember)
+                ) { Text("Save Changes", color = Ink.bg) }
+                
+                Spacer(Modifier.height(8.dp))
+                TextButton(onClick = { confirmDelete = true }, modifier = Modifier.fillMaxWidth()) {
+                    Text("Delete Category", color = Ink.danger)
+                }
+                Spacer(Modifier.height(32.dp))
+            }
+        }
+
+        if (confirmDelete) {
+            AlertDialog(
+                onDismissRequest = { confirmDelete = false },
+                title = { Text("Delete ${cat.name}?") },
+                text = { Text("This will remove the category and all its exercises. Logged sessions will stay but become unassigned.") },
+                confirmButton = {
+                    TextButton(onClick = { vm.deleteCategory(cat.id); confirmDelete = false; editingCat = null }) {
+                        Text("Delete", color = Ink.danger)
+                    }
+                },
+                dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } }
+            )
+        }
+    }
+
     if (managingCat != null) {
         var newEx by remember { mutableStateOf("") }
+        var editingEx by remember { mutableStateOf<ExerciseEntity?>(null) }
         
         ModalBottomSheet(onDismissRequest = { managingCat = null }) {
             val variationsFlow = vm.variationPool.collectAsState()
@@ -444,10 +500,56 @@ private fun ManageTab(vm: GymViewModel) {
                 Eyebrow("Variations")
                 LazyColumn(Modifier.weight(1f)) {
                     items(variationsFlow.value) { ex ->
-                        Text(ex.name, Modifier.padding(vertical = 8.dp), style = MaterialTheme.typography.bodyLarge)
+                        Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text(ex.name, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
+                            IconButton(onClick = { editingEx = ex }) {
+                                Icon(Icons.Default.Edit, null, tint = Ink.textDim, modifier = Modifier.size(18.dp))
+                            }
+                        }
                     }
                 }
                 Spacer(Modifier.height(32.dp))
+            }
+        }
+
+        editingEx?.let { ex ->
+            var name by remember { mutableStateOf(ex.name) }
+            var confirmDeleteEx by remember { mutableStateOf(false) }
+
+            Dialog(onDismissRequest = { editingEx = null }) {
+                InkCard {
+                    Column(Modifier.padding(24.dp)) {
+                        Text("Edit Variation", style = MaterialTheme.typography.titleLarge)
+                        Spacer(Modifier.height(16.dp))
+                        OutlinedTextField(name, { name = it }, label = { Text("Name") }, modifier = Modifier.fillMaxWidth())
+                        Spacer(Modifier.height(24.dp))
+                        Button(
+                            onClick = { vm.updateExerciseVariation(ex.id, ex.categoryId, name); editingEx = null },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(containerColor = Ink.ember)
+                        ) { Text("Save", color = Ink.bg) }
+                        TextButton(onClick = { confirmDeleteEx = true }, modifier = Modifier.fillMaxWidth()) {
+                            Text("Delete Variation", color = Ink.danger)
+                        }
+                        TextButton(onClick = { editingEx = null }, modifier = Modifier.fillMaxWidth()) {
+                            Text("Cancel")
+                        }
+                    }
+                }
+            }
+
+            if (confirmDeleteEx) {
+                AlertDialog(
+                    onDismissRequest = { confirmDeleteEx = false },
+                    title = { Text("Delete ${ex.name}?") },
+                    text = { Text("This will remove this exercise variation. Past sets logged with this variation will be lost.") },
+                    confirmButton = {
+                        TextButton(onClick = { vm.deleteExerciseVariation(ex.id); confirmDeleteEx = false; editingEx = null }) {
+                            Text("Delete", color = Ink.danger)
+                        }
+                    },
+                    dismissButton = { TextButton(onClick = { confirmDeleteEx = false }) { Text("Cancel") } }
+                )
             }
         }
     }

@@ -4,6 +4,7 @@ import android.app.Application
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.lifetrack.app.creditcard.CreditCardEntity
 import com.lifetrack.app.data.db.AppDatabase
 import com.lifetrack.app.data.db.dao.CategorySpend
 import com.lifetrack.app.data.db.dao.TxnTagLink
@@ -87,6 +88,7 @@ data class DashboardUiState(
 class ExpenseViewModel(app: Application) : AndroidViewModel(app) {
 
     private val dao = AppDatabase.get(app).expenseDao()
+    private val cardDao = AppDatabase.get(app).creditCardDao()
     private val repo = ExpenseRepository.get(app)
     private val budgetPrefs = BudgetPrefs.get(app)
     private val archive = ArchiveRepository.get(app)
@@ -451,6 +453,38 @@ class ExpenseViewModel(app: Application) : AndroidViewModel(app) {
     fun categorize(txn: TransactionEntity, categoryId: Long, learnRule: Boolean) =
         viewModelScope.launch { repo.categorize(txn, categoryId, learnRule) }
 
+    /** How many OTHER transactions share this merchant -- used to decide whether the
+     *  "apply to N other transactions too?" confirmation is worth showing at all. */
+    suspend fun countOtherTxnsForMerchant(matchKey: String, excludeTxnId: Long): Int =
+        dao.countOtherTxnsForMatchKey(matchKey, excludeTxnId)
+
+    /** Sets this transaction's category, learns the merchant rule for future SMS, and only
+     *  rewrites the merchant's other existing transactions if [applyToExisting] is confirmed. */
+    fun categorizeAndLearn(txn: TransactionEntity, categoryId: Long, applyToExisting: Boolean) =
+        viewModelScope.launch { repo.categorizeAndLearn(txn, categoryId, applyToExisting) }
+
+    /** Live visit count for a merchant, including the transaction currently being viewed. */
+    fun visitCount(matchKey: String) = dao.countTxnsForMatchKeyFlow(matchKey)
+
+    fun txnsForMerchant(matchKey: String) = dao.txnsForMatchKey(matchKey)
+
+    fun visitsByMonth(matchKey: String) = dao.visitsByMonth(matchKey)
+
+    // --- Trends page ---
+
+    /** Which bucket the Trends chart is currently grouped by. */
+    enum class TrendGranularity { DAY, WEEK, MONTH }
+
+    fun trends(granularity: TrendGranularity, from: Long, to: Long) = when (granularity) {
+        TrendGranularity.DAY -> dao.trendsByPeriod("%Y-%m-%d", from, to)
+        TrendGranularity.WEEK -> dao.trendsByWeek(from, to)
+        TrendGranularity.MONTH -> dao.trendsByPeriod("%Y-%m", from, to)
+    }
+
+    /** Backs the Trends page's "Review <period>" drill-down -- exact millisecond range, not a
+     *  parsed period string, so it works identically regardless of which granularity is showing. */
+    fun txnsInRange(from: Long, to: Long) = dao.txnsInRange(from, to)
+
     fun toggleExclusion(txnId: Long, excluded: Boolean) =
         viewModelScope.launch { dao.setUserExclusion(txnId, excluded) }
 
@@ -505,6 +539,11 @@ class ExpenseViewModel(app: Application) : AndroidViewModel(app) {
 
     fun updateNote(txnId: Long, note: String) = viewModelScope.launch {
         dao.updateTxnNote(txnId, note)
+    }
+
+    /** Permanently removes one transaction (and its tag links). Categories/rules are untouched. */
+    fun deleteTransaction(txnId: Long) = viewModelScope.launch {
+        dao.deleteTxnCascade(txnId)
     }
 
     private val _transferSweep = MutableStateFlow<String?>(null)
@@ -595,11 +634,108 @@ class ExpenseViewModel(app: Application) : AndroidViewModel(app) {
         _importResult.value = repo.backfillFromInbox(days = 90)
         runMerchantClassification()
         runTransferSweep()
+        refreshCreditCards()
     }
 
     fun importAllFromInbox() = viewModelScope.launch {
         _importResult.value = repo.backfillFromInbox(days = Int.MAX_VALUE)
         runMerchantClassification()
         runTransferSweep()
+        refreshCreditCards()
     }
+
+    // ============================== CREDIT CARDS ============================
+    //
+    // Deliberately kept fully separate from Overall: these transactions carry isExcluded=true
+    // and never appear in totalSpend/totalIncome/categoryRows. A card is auto-registered the
+    // first time its statement SMS arrives (see ExpenseRepository.recordStatement); this section
+    // is read/management UI on top of that, plus the retroactive rematch sweep and manual
+    // add/edit/delete for cards a statement hasn't been seen for yet.
+
+    /** One card's running total for its current OPEN cycle (since its last statement, or since
+     *  it was registered if it has none yet), computed from actual transaction flow. */
+    data class CreditCardSummary(
+        val card: CreditCardEntity,
+        val cycleSpend: Double,
+        val cycleTxnCount: Int,
+        val cycleStart: Long,
+        val lastStatementTotal: Double?
+    )
+
+    private val _creditCardSummaries = MutableStateFlow<List<CreditCardSummary>>(emptyList())
+    val creditCardSummaries: StateFlow<List<CreditCardSummary>> = _creditCardSummaries
+
+    private val _creditCardStatus = MutableStateFlow<String?>(null)
+    val creditCardStatus: StateFlow<String?> = _creditCardStatus
+
+    init {
+        refreshCreditCards()
+    }
+
+    /** Recomputes every card's current-cycle summary. Cheap; call after anything that could
+     *  change card membership or add a transaction (import, rematch, add/edit/delete card). */
+    fun refreshCreditCards() = viewModelScope.launch {
+        _creditCardSummaries.value = cardDao.cardsSync().map { card ->
+            val latest = cardDao.latestStatement(card.id)
+            val since = latest?.statementDate ?: card.createdAt
+            CreditCardSummary(
+                card = card,
+                cycleSpend = cardDao.cycleSpendSync(card.id, since),
+                cycleTxnCount = cardDao.cycleTxnCount(card.id, since),
+                cycleStart = since,
+                lastStatementTotal = latest?.totalDue
+            )
+        }
+    }
+
+    private val txnFlows = mutableMapOf<Long, StateFlow<List<TransactionEntity>>>()
+    private val statementFlows = mutableMapOf<Long, StateFlow<List<com.lifetrack.app.creditcard.CreditCardStatementEntity>>>()
+
+    /** Every transaction for one card, most recent first -- for the card's detail screen.
+     *  Cached to prevent UI "shaking" from re-creating flows on every recomposition. */
+    fun txnsForCard(cardId: Long): StateFlow<List<TransactionEntity>> = txnFlows.getOrPut(cardId) {
+        cardDao.txnsForCard(cardId)
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    }
+
+    fun statementsForCard(cardId: Long): StateFlow<List<com.lifetrack.app.creditcard.CreditCardStatementEntity>> = statementFlows.getOrPut(cardId) {
+        cardDao.statementsForCard(cardId)
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    }
+
+    /** Manual registration, for a card whose first statement hasn't arrived/been imported yet. */
+    fun addCreditCard(name: String, lastFourDigits: String, colorHex: String, emoji: String) =
+        viewModelScope.launch {
+            val digits = lastFourDigits.filter { it.isDigit() }.takeLast(4)
+            if (digits.length == 4 && name.isNotBlank()) {
+                cardDao.insertCard(
+                    CreditCardEntity(name = name.trim(), lastFourDigits = digits, colorHex = colorHex, emoji = emoji)
+                )
+                runCreditCardRematch()
+            }
+        }
+
+    fun updateCreditCard(id: Long, name: String, colorHex: String, emoji: String) = viewModelScope.launch {
+        cardDao.updateCard(id, name.trim(), colorHex, emoji)
+        refreshCreditCards()
+    }
+
+    /** Detaches the card's transactions back into ordinary counted spend, then removes the card. */
+    fun deleteCreditCard(id: Long) = viewModelScope.launch {
+        cardDao.deleteCardCascade(id)
+        refreshCreditCards()
+    }
+
+    /**
+     * Retroactively links existing transactions to cards that weren't registered yet when those
+     * transactions first arrived (e.g. you add a card manually, or its first statement shows up
+     * after some of its purchases were already imported as ordinary spend).
+     */
+    fun runCreditCardRematch() = viewModelScope.launch {
+        val n = repo.rematchCreditCardTransactions()
+        refreshCreditCards()
+        _creditCardStatus.value = if (n == 0) "Nothing new to match." else "Matched $n transaction(s) to your cards."
+    }
+
+    fun clearCreditCardStatus() { _creditCardStatus.value = null }
 }

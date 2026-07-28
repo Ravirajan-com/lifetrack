@@ -3,8 +3,12 @@ package com.lifetrack.app.data.repo
 import android.content.Context
 import android.provider.Telephony
 import com.lifetrack.app.classification.MerchantClassifier
+import com.lifetrack.app.creditcard.CreditCardEntity
+import com.lifetrack.app.creditcard.CreditCardMatcher
+import com.lifetrack.app.creditcard.CreditCardStatementEntity
 import com.lifetrack.app.data.db.AppDatabase
 import com.lifetrack.app.data.db.entity.CategorySource
+import com.lifetrack.app.data.db.entity.ExclusionSource
 import com.lifetrack.app.data.db.entity.MerchantRuleEntity
 import com.lifetrack.app.data.db.entity.TransactionEntity
 import com.lifetrack.app.sms.SmsParser
@@ -14,6 +18,7 @@ import kotlinx.coroutines.withContext
 class ExpenseRepository private constructor(private val context: Context) {
 
     private val dao = AppDatabase.get(context).expenseDao()
+    private val cardDao = AppDatabase.get(context).creditCardDao()
 
     /**
      * New SMS txn arrives.
@@ -24,7 +29,7 @@ class ExpenseRepository private constructor(private val context: Context) {
      */
     suspend fun ingestSmsTransaction(txn: TransactionEntity) {
         val rule = dao.ruleFor(txn.matchKey)
-        val toInsert = when {
+        val categorized = when {
             rule != null -> txn.copy(categoryId = rule.categoryId, categorySource = CategorySource.RULE)
             else -> {
                 val guess = MerchantClassifier.classify(txn.merchant, txn.rawSms)
@@ -36,7 +41,75 @@ class ExpenseRepository private constructor(private val context: Context) {
                 }
             }
         }
+
+        // If this transaction references a card we're already tracking, it belongs to that
+        // card's own view entirely -- excluded from Overall, whichever side of the credit-card
+        // lifecycle it is (a purchase, or the eventual bill payment).
+        val last4 = txn.rawSms?.let { CreditCardMatcher.extractLast4(it) }
+        val card = last4?.let { cardDao.cardByLast4(it) }
+        val toInsert = if (card != null) {
+            categorized.copy(
+                creditCardId = card.id,
+                isExcluded = true,
+                exclusionSource = ExclusionSource.CREDIT_CARD
+            )
+        } else {
+            categorized
+        }
         dao.insertTxn(toInsert)
+    }
+
+    /**
+     * Single entry point for one raw incoming SMS, used by both the live receiver and the inbox
+     * backfill. A statement-generated SMS is NOT a transaction (SmsParser correctly rejects it --
+     * no money moved) but it's also not nothing: it registers the card and marks a cycle
+     * boundary. That has to be checked independently of SmsParser, since SmsParser only ever
+     * sees "is this a transaction or not", not "is this some other kind of bank message worth
+     * recording".
+     */
+    suspend fun processSms(body: String, timestamp: Long): Boolean {
+        CreditCardMatcher.extractStatementInfo(body)?.let { info ->
+            recordStatement(info, timestamp, body)
+            return false
+        }
+        val txn = SmsParser.parse(body, timestamp) ?: return false
+        ingestSmsTransaction(txn)
+        return true
+    }
+
+    private suspend fun recordStatement(info: com.lifetrack.app.creditcard.StatementInfo, timestamp: Long, rawSms: String) {
+        val cardId = cardDao.getOrCreateCard(
+            name = "${info.bank ?: "Card"} •${info.last4}",
+            last4 = info.last4,
+            bank = info.bank
+        )
+        if (cardId <= 0) return
+        cardDao.insertStatement(
+            CreditCardStatementEntity(
+                cardId = cardId,
+                statementDate = timestamp,
+                totalDue = info.totalDue,
+                rawSms = rawSms
+            )
+        )
+    }
+
+    /**
+     * User categorizes a txn, with a merchant-rule confirmation flow instead of an always-on
+     * toggle.
+     *
+     * The rule (matchKey -> category) is ALWAYS created, so future incoming transactions from
+     * this merchant auto-categorize -- that's forward-looking and non-destructive, no reason to
+     * gate it behind a confirmation. Only rewriting the merchant's OTHER, already-existing
+     * transactions is destructive enough to ask about, which is what [applyToExisting] controls.
+     * The current transaction's own category is always set directly, regardless.
+     */
+    suspend fun categorizeAndLearn(txn: TransactionEntity, categoryId: Long, applyToExisting: Boolean) {
+        dao.upsertRule(MerchantRuleEntity(matchKey = txn.matchKey, categoryId = categoryId))
+        dao.overrideTxnCategory(txn.id, categoryId)
+        if (applyToExisting) {
+            dao.applyRuleToExisting(txn.matchKey, categoryId)
+        }
     }
 
     /**
@@ -73,9 +146,8 @@ class ExpenseRepository private constructor(private val context: Context) {
             val bodyIdx = it.getColumnIndex(Telephony.Sms.BODY)
             val dateIdx = it.getColumnIndex(Telephony.Sms.DATE)
             while (it.moveToNext()) {
-                val txn = SmsParser.parse(it.getString(bodyIdx), it.getLong(dateIdx)) ?: continue
-                ingestSmsTransaction(txn)
-                imported++
+                val body = it.getString(bodyIdx) ?: continue
+                if (processSms(body, it.getLong(dateIdx))) imported++
             }
         }
         imported
@@ -107,6 +179,23 @@ class ExpenseRepository private constructor(private val context: Context) {
     /** Undo every keyword-sourced categorization in one shot. Never touches USER or RULE rows. */
     suspend fun undoKeywordAutoTags(): Int = withContext(Dispatchers.IO) {
         dao.resetKeywordAutoTags()
+    }
+
+    /**
+     * Retroactively links existing transactions to credit cards that weren't registered yet
+     * when those transactions were first ingested (e.g. a card's first-ever statement arrives
+     * after several of its purchases were already imported as ordinary, counted spend).
+     * Safe to re-run -- only touches rows with no card link yet.
+     */
+    suspend fun rematchCreditCardTransactions(): Int = withContext(Dispatchers.IO) {
+        var matched = 0
+        for (txn in cardDao.unlinkedTxnsWithSms()) {
+            val last4 = CreditCardMatcher.extractLast4(txn.rawSms ?: "") ?: continue
+            val card = cardDao.cardByLast4(last4) ?: continue
+            cardDao.tagTxnToCard(txn.id, card.id)
+            matched++
+        }
+        matched
     }
 
     companion object {
