@@ -470,6 +470,21 @@ class ExpenseViewModel(app: Application) : AndroidViewModel(app) {
 
     fun visitsByMonth(matchKey: String) = dao.visitsByMonth(matchKey)
 
+    // --- Trends page ---
+
+    /** Which bucket the Trends chart is currently grouped by. */
+    enum class TrendGranularity { DAY, WEEK, MONTH }
+
+    fun trends(granularity: TrendGranularity, from: Long, to: Long) = when (granularity) {
+        TrendGranularity.DAY -> dao.trendsByPeriod("%Y-%m-%d", from, to)
+        TrendGranularity.WEEK -> dao.trendsByWeek(from, to)
+        TrendGranularity.MONTH -> dao.trendsByPeriod("%Y-%m", from, to)
+    }
+
+    /** Backs the Trends page's "Review <period>" drill-down -- exact millisecond range, not a
+     *  parsed period string, so it works identically regardless of which granularity is showing. */
+    fun txnsInRange(from: Long, to: Long) = dao.txnsInRange(from, to)
+
     fun toggleExclusion(txnId: Long, excluded: Boolean) =
         viewModelScope.launch { dao.setUserExclusion(txnId, excluded) }
 

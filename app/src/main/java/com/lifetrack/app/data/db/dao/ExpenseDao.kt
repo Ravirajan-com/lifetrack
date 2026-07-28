@@ -18,6 +18,9 @@ data class CategorySpend(val categoryId: Long?, val name: String?, val colorHex:
 data class BankSpend(val name: String, val total: Double)
 data class DailySpend(val epochDay: Long, val total: Double)
 
+/** One bucket of the Trends chart -- a day, week, or month, per the caller's chosen format. */
+data class PeriodTotals(val period: String, val spend: Double, val income: Double)
+
 /** One month of live totals, computed from raw transactions. */
 data class MonthTotal(
     val yearMonth: String,
@@ -74,7 +77,7 @@ interface ExpenseDao {
      * (e.g. default-category seeding and merchant classification both deciding "Bills" doesn't
      * exist yet) can no longer both win -- the DB's unique index plus IGNORE means whichever
      * insert loses the race gets ignored, not silently duplicated, and the relookup below finds
-     * the row the row the winner created.
+     * the row the winner created.
      */
     @androidx.room.Transaction
     suspend fun getOrCreateCategory(
@@ -219,6 +222,52 @@ interface ExpenseDao {
            GROUP BY epochDay ORDER BY epochDay"""
     )
     fun dailySpend(from: Long, to: Long): Flow<List<DailySpend>>
+
+    /**
+     * Spend and income grouped by day, week, or month, per [fmt] -- an SQLite strftime format
+     * string ("%Y-%m-%d", "%Y-%W", or "%Y-%m") chosen by the caller depending on which
+     * granularity the Trends page is showing. Same 'localtime' correction as dailySpend above:
+     * grouping in UTC would push pre-05:30-IST transactions onto the wrong calendar day/week/month.
+     */
+    @Query(
+        """SELECT strftime(:fmt, t.timestamp / 1000, 'unixepoch', 'localtime') AS period,
+                  SUM(CASE WHEN t.type = 'DEBIT'  AND t.isExcluded = 0 THEN t.amount ELSE 0 END) AS spend,
+                  SUM(CASE WHEN t.type = 'CREDIT' AND t.isExcluded = 0 THEN t.amount ELSE 0 END) AS income
+           FROM transactions t
+           WHERE t.timestamp >= :from AND t.timestamp < :to
+           GROUP BY period ORDER BY period"""
+    )
+    fun trendsByPeriod(fmt: String, from: Long, to: Long): Flow<List<PeriodTotals>>
+
+    /**
+     * Same as trendsByPeriod, but for WEEK: groups by the Monday of each week rather than a
+     * SQLite week-number format, specifically so the returned period string is a plain ISO date
+     * ("2026-07-21") that Kotlin's LocalDate.parse can read back exactly like DAY's period does --
+     * SQLite's own %W week-number format doesn't map back to an unambiguous date on its own.
+     * The expression: weekday(0=Sun..6=Sat) converted to a Monday-based offset, subtracted from
+     * the date, lands on that week's Monday regardless of which day of the week a transaction fell on.
+     */
+    @Query(
+        """SELECT date(
+                      t.timestamp / 1000, 'unixepoch', 'localtime',
+                      '-' || ((CAST(strftime('%w', t.timestamp / 1000, 'unixepoch', 'localtime') AS INTEGER) + 6) % 7) || ' days'
+                  ) AS period,
+                  SUM(CASE WHEN t.type = 'DEBIT'  AND t.isExcluded = 0 THEN t.amount ELSE 0 END) AS spend,
+                  SUM(CASE WHEN t.type = 'CREDIT' AND t.isExcluded = 0 THEN t.amount ELSE 0 END) AS income
+           FROM transactions t
+           WHERE t.timestamp >= :from AND t.timestamp < :to
+           GROUP BY period ORDER BY period"""
+    )
+    fun trendsByWeek(from: Long, to: Long): Flow<List<PeriodTotals>>
+
+    /**
+     * Every transaction in an exact time range, most recent first -- backs the Trends page's
+     * "Review <period>" drill-down. The caller computes [from]/[to] as the real millisecond
+     * boundaries of whichever day/week/month was tapped (java.time, not a parsed period string),
+     * so this stays a plain, exact range query regardless of granularity.
+     */
+    @Query("SELECT * FROM transactions WHERE timestamp >= :from AND timestamp < :to ORDER BY timestamp DESC")
+    fun txnsInRange(from: Long, to: Long): Flow<List<TransactionEntity>>
 
     @Query("SELECT COALESCE(SUM(amount),0) FROM transactions WHERE type='DEBIT' AND isExcluded = 0 AND timestamp >= :from AND timestamp < :to")
     fun totalSpend(from: Long, to: Long): Flow<Double>

@@ -12,6 +12,10 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.foundation.layout.Row
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.toColorInt
 
@@ -67,6 +71,21 @@ fun BarChart(bars: List<Bar>, color: Color, modifier: Modifier = Modifier) {
                     topLeft = Offset(i * (barWidth + gap), size.height - h),
                     size = Size(barWidth, h),
                     cornerRadius = androidx.compose.ui.geometry.CornerRadius(barWidth / 3, barWidth / 3)
+                )
+            }
+        }
+        // Bar accepted a `label` per bar but this chart never actually drew it -- every bar was
+        // just an unlabeled colored rectangle with no way to tell which one is which. A Row of
+        // Text below the Canvas, evenly divided the same way the bars are, fixes that.
+        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+            bars.forEach { bar ->
+                Text(
+                    bar.label,
+                    modifier = Modifier.weight(1f),
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }

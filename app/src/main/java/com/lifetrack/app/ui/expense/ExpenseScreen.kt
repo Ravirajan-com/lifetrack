@@ -79,12 +79,12 @@ fun ExpenseScreen(vm: ExpenseViewModel = viewModel()) {
                 containerColor = MaterialTheme.colorScheme.background,
                 contentColor = Ink.mint,
             ) {
-                listOf("Overview", "Activity", "Year", "Cards", "Inbox").forEachIndexed { i, t ->
+                listOf("Overview", "Activity", "Trends", "Year", "Cards", "Inbox").forEachIndexed { i, t ->
                     Tab(
                         selected = tab == i,
                         onClick = { tab = i },
                         text = {
-                            val label = if ((i == 4) && (pendingCount > 0)) "$t · $pendingCount" else t
+                            val label = if ((i == 5) && (pendingCount > 0)) "$t · $pendingCount" else t
                             Text(label)
                         },
                         selectedContentColor = Ink.mint,
@@ -103,9 +103,10 @@ fun ExpenseScreen(vm: ExpenseViewModel = viewModel()) {
                     onEditCategory = { editingCategory = it }
                 )
                 1 -> ActivityTab(vm) { detailing = it }
-                2 -> YearTab(vm) { showArchive = true }
-                3 -> CreditCardsTab(vm)
-                4 -> InboxTab(vm) { detailing = it }
+                2 -> TrendsTab(vm)
+                3 -> YearTab(vm) { showArchive = true }
+                4 -> CreditCardsTab(vm)
+                5 -> InboxTab(vm) { detailing = it }
             }
         }
     }
@@ -894,6 +895,13 @@ private fun TransactionDetailsSheet(
  * Tapping the "N visits" badge opens this: a month-by-month bar chart of how often this
  * merchant/UPI id has been transacted with, plus the raw list underneath.
  */
+/** "2026-07" -> "Jul '26" for the merchant-history bar chart. Falls back to the raw string if
+ *  the format is ever unexpected, rather than crashing the sheet over a display label. */
+private fun monthLabel(yearMonth: String): String =
+    runCatching {
+        YearMonth.parse(yearMonth).format(DateTimeFormatter.ofPattern("MMM ''yy"))
+    }.getOrDefault(yearMonth)
+
 @Composable
 private fun MerchantHistorySheet(vm: ExpenseViewModel, matchKey: String, merchantName: String, onDone: () -> Unit) {
     val monthly by remember(matchKey) { vm.visitsByMonth(matchKey) }.collectAsState(initial = emptyList())
@@ -922,7 +930,7 @@ private fun MerchantHistorySheet(vm: ExpenseViewModel, matchKey: String, merchan
         if (monthly.isNotEmpty()) {
             InkCard(Modifier.fillMaxWidth()) {
                 BarChart(
-                    bars = monthly.map { Bar(it.yearMonth.takeLast(2), it.count.toDouble()) },
+                    bars = monthly.map { Bar(monthLabel(it.yearMonth), it.count.toDouble()) },
                     color = Ink.mint,
                     modifier = Modifier.padding(12.dp)
                 )
