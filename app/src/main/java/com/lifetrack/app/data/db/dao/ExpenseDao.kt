@@ -41,8 +41,18 @@ data class TxnTagLink(
 interface ExpenseDao {
 
     // --- categories ---
+    // Used by manual "new category" and by backup/restore, which both supply a specific id and
+    // rely on REPLACE-by-primary-key semantics (e.g. restoring a backup's own ids intact).
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertCategory(c: CategoryEntity): Long
+
+    // Used only by getOrCreateCategory below. IGNORE (not REPLACE) is required here: with the
+    // (name, kind) unique index now in place, REPLACE would delete-then-reinsert on a conflict,
+    // silently changing the row's id out from under any transaction or merchant rule already
+    // pointing at it. IGNORE simply no-ops on conflict, and getOrCreateCategory re-looks-up the
+    // existing row's real id in that case.
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertCategoryIfAbsent(c: CategoryEntity): Long
 
     @Query("SELECT * FROM categories ORDER BY name")
     fun categories(): Flow<List<CategoryEntity>>
@@ -59,6 +69,12 @@ interface ExpenseDao {
     /**
      * Finds an existing category by (name, kind) or creates it. Used by the merchant classifier
      * so re-running it never produces duplicate "Food & Dining" categories.
+     *
+     * Race-safe: two independent callers racing to create the same (name, kind) at app startup
+     * (e.g. default-category seeding and merchant classification both deciding "Bills" doesn't
+     * exist yet) can no longer both win -- the DB's unique index plus IGNORE means whichever
+     * insert loses the race gets ignored, not silently duplicated, and the relookup below finds
+     * the row the row the winner created.
      */
     @androidx.room.Transaction
     suspend fun getOrCreateCategory(
@@ -68,7 +84,8 @@ interface ExpenseDao {
         kind: CategoryKind = CategoryKind.EXPENSE
     ): Long {
         categoryByNameAndKind(name, kind)?.let { return it.id }
-        return upsertCategory(CategoryEntity(name = name, colorHex = colorHex, iconEmoji = emoji, kind = kind))
+        val id = insertCategoryIfAbsent(CategoryEntity(name = name, colorHex = colorHex, iconEmoji = emoji, kind = kind))
+        return if (id > 0) id else (categoryByNameAndKind(name, kind)?.id ?: -1L)
     }
 
     @Query("DELETE FROM categories WHERE id = :id")

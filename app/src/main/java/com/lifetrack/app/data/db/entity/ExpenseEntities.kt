@@ -60,7 +60,7 @@ enum class CategorySource {
     KEYWORD_AUTO
 }
 
-@Entity(tableName = "categories")
+@Entity(tableName = "categories", indices = [Index(value = ["name", "kind"], unique = true)])
 data class CategoryEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val name: String,

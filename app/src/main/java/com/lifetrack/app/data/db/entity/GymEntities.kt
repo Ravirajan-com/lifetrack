@@ -5,7 +5,7 @@ import androidx.room.Index
 import androidx.room.PrimaryKey
 
 /** A muscle group or workout type, e.g. "Chest", "Legs", "Push" */
-@Entity(tableName = "workout_categories")
+@Entity(tableName = "workout_categories", indices = [Index(value = ["name"], unique = true)])
 data class WorkoutCategoryEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val name: String,
@@ -13,7 +13,7 @@ data class WorkoutCategoryEntity(
 )
 
 /** An exercise variation belonging to a category, e.g. "Bench Press" under "Chest" */
-@Entity(tableName = "exercises", indices = [Index("categoryId")])
+@Entity(tableName = "exercises", indices = [Index(value = ["categoryId", "name"], unique = true)])
 data class ExerciseEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val categoryId: Long,

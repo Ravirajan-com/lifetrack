@@ -12,8 +12,14 @@ import kotlinx.coroutines.flow.Flow
 @Dao
 interface GoalDao {
 
-    @Insert suspend fun insertGoal(g: GoalEntity): Long
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertGoal(g: GoalEntity): Long
+
     @Update suspend fun updateGoal(g: GoalEntity)
+
+    @Query("SELECT * FROM goals WHERE title = :title LIMIT 1")
+    suspend fun goalByTitle(title: String): GoalEntity?
+
     @Query("UPDATE goals SET active = 0 WHERE id = :id") suspend fun archiveGoal(id: Long)
 
     /** Goals visible on a given day: recurring ones + that day's specific ones. */

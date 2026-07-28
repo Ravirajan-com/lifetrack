@@ -118,5 +118,21 @@ class GymViewModel(app: Application) : AndroidViewModel(app) {
         trainingCategory.value = null
     }
 
+    fun updateCategory(id: Long, name: String, color: String) = viewModelScope.launch {
+        dao.updateCategory(WorkoutCategoryEntity(id = id, name = name, colorHex = color))
+    }
+
+    fun deleteCategory(id: Long) = viewModelScope.launch {
+        dao.deleteCategory(id)
+    }
+
+    fun updateExerciseVariation(id: Long, catId: Long, name: String) = viewModelScope.launch {
+        dao.updateExercise(ExerciseEntity(id = id, categoryId = catId, name = name))
+    }
+
+    fun deleteExerciseVariation(id: Long) = viewModelScope.launch {
+        dao.deleteExercise(id)
+    }
+
     fun progressFor(exerciseId: Long): Flow<List<ExerciseProgressPoint>> = dao.progressFor(exerciseId)
 }

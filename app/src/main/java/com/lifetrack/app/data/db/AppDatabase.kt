@@ -35,7 +35,7 @@ import com.lifetrack.app.data.db.entity.WorkoutCategoryEntity
         GoalEntity::class, GoalCompletionEntity::class,
         CreditCardEntity::class, CreditCardStatementEntity::class
     ],
-    version = 10,
+    version = 11,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -212,6 +212,49 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v10 -> v11: closes duplication gaps and implements Gym/Goal deduplication.
+         */
+        private val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // --- categories: merge duplicates ---
+                db.execSQL(
+                    """UPDATE transactions SET categoryId = (
+                           SELECT MIN(c2.id) FROM categories c2
+                           JOIN categories c1 ON c1.name = c2.name AND c1.kind = c2.kind
+                           WHERE c1.id = transactions.categoryId
+                       )
+                       WHERE categoryId IS NOT NULL"""
+                )
+                db.execSQL(
+                    """UPDATE merchant_rules SET categoryId = (
+                           SELECT MIN(c2.id) FROM categories c2
+                           JOIN categories c1 ON c1.name = c2.name AND c1.kind = c2.kind
+                           WHERE c1.id = merchant_rules.categoryId
+                       )"""
+                )
+                db.execSQL("DELETE FROM categories WHERE id NOT IN (SELECT MIN(id) FROM categories GROUP BY name, kind)")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_categories_name_kind` ON `categories` (`name`, `kind`)")
+
+                // --- credit_card_statements: dedupe ---
+                db.execSQL("DELETE FROM credit_card_statements WHERE id NOT IN (SELECT MIN(id) FROM credit_card_statements GROUP BY cardId, statementDate)")
+                db.execSQL("DROP INDEX IF EXISTS `index_credit_card_statements_cardId`")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_credit_card_statements_cardId_statementDate` ON `credit_card_statements` (`cardId`, `statementDate`)")
+
+                // --- gym: dedupe categories and exercises ---
+                db.execSQL("DELETE FROM workout_categories WHERE id NOT IN (SELECT MIN(id) FROM workout_categories GROUP BY name)")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_workout_categories_name` ON `workout_categories` (`name`)")
+                
+                db.execSQL("DELETE FROM exercises WHERE id NOT IN (SELECT MIN(id) FROM exercises GROUP BY categoryId, name)")
+                db.execSQL("DROP INDEX IF EXISTS `index_exercises_categoryId`")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_exercises_categoryId_name` ON `exercises` (`categoryId`, `name`)")
+
+                // --- goals: dedupe ---
+                db.execSQL("DELETE FROM goals WHERE id NOT IN (SELECT MIN(id) FROM goals GROUP BY title)")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_goals_title` ON `goals` (`title`)")
+            }
+        }
+
         @Volatile private var instance: AppDatabase? = null
 
         fun get(context: Context): AppDatabase =
@@ -219,10 +262,10 @@ abstract class AppDatabase : RoomDatabase() {
                 instance ?: Room.databaseBuilder(
                     context.applicationContext, AppDatabase::class.java, "lifetrack.db"
                 )
-                    .addMigrations(MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10)
-                    // Safety net while you're still iterating on the schema. Room prefers a real
-                    // migration when one exists and only wipes when no path is found.
-                    // DELETE THIS LINE before you ship / start keeping data you care about.
+                    .addMigrations(
+                        MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8,
+                        MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11
+                    )
                     .fallbackToDestructiveMigration()
                     .build()
                     .also { instance = it }

@@ -28,7 +28,7 @@ data class CreditCardEntity(
  * a tracked card. totalDue is reference info only -- see the doc comment on StatementInfo for
  * why the running balance is computed from actual transactions instead of this field.
  */
-@Entity(tableName = "credit_card_statements", indices = [Index("cardId")])
+@Entity(tableName = "credit_card_statements", indices = [Index(value = ["cardId", "statementDate"], unique = true)])
 data class CreditCardStatementEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val cardId: Long,

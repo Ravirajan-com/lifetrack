@@ -4,12 +4,13 @@ import kotlinx.serialization.Serializable
 
 @Serializable
 data class LifeTrackBackup(
-    /** v2 added category icons and transaction tags. Older files still parse via defaults. */
-    val version: Int = 2,
+    /** v3 adds credit cards and goal completion tracking. */
+    val version: Int = 3,
     val timestamp: Long = System.currentTimeMillis(),
     val expenses: ExpenseBackup,
     val gym: GymBackup,
     val goals: GoalBackup,
+    val creditCards: CreditCardBackup? = null,
 )
 
 @Serializable
@@ -119,4 +120,28 @@ data class GoalEntry(
 data class CompletionEntry(
     val goalTitle: String,
     val epochDay: Long,
+)
+
+@Serializable
+data class CreditCardBackup(
+    val cards: List<CreditCardEntry>,
+    val statements: List<StatementEntry>
+)
+
+@Serializable
+data class CreditCardEntry(
+    val name: String,
+    val lastFourDigits: String,
+    val bank: String?,
+    val colorHex: String,
+    val emoji: String,
+    val createdAt: Long
+)
+
+@Serializable
+data class StatementEntry(
+    val lastFourDigits: String,
+    val statementDate: Long,
+    val totalDue: Double?,
+    val rawSms: String?
 )
