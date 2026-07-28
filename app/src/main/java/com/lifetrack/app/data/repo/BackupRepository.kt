@@ -30,7 +30,7 @@ class BackupRepository private constructor(context: Context) {
         val tagsByTxn = expenseDao.allTxnTagLinksSync().groupBy({ it.txnId }, { it.name })
 
         val cards = cardDao.cardsSync()
-        val statements = cardDao.allStatementsSync()
+        val allStatements = cardDao.allStatementsSync()
 
         val gymCategories = gymDao.allCategoriesSync()
         val exercises = gymDao.allExercisesSync()
@@ -97,7 +97,7 @@ class BackupRepository private constructor(context: Context) {
                 cards = cards.map { 
                     CreditCardEntry(it.name, it.lastFourDigits, it.bank, it.colorHex, it.emoji, it.createdAt) 
                 },
-                statements = statements.map { st ->
+                statements = allStatements.map { st ->
                     val card = cards.find { it.id == st.cardId }
                     StatementEntry(card?.lastFourDigits ?: "", st.statementDate, st.totalDue, st.rawSms)
                 }
@@ -208,7 +208,7 @@ class BackupRepository private constructor(context: Context) {
             val exerciseId = exerciseMap[sl.categoryName to sl.exerciseName]
             if (sessionId != null && exerciseId != null) {
                 gymDao.insertSet(
-                    SetLogEntity(
+                    com.lifetrack.app.data.db.entity.SetLogEntity(
                         sessionId = sessionId, 
                         exerciseId = exerciseId, 
                         setNumber = sl.setNumber, 
