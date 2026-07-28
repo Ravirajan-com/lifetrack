@@ -30,7 +30,7 @@ data class MonthTotal(
 )
 
 /** One month's visit count for a merchant, used to draw the history bar chart. */
-data class MonthlyVisitCount(val yearMonth: String, val count: Int)
+data class MonthlyVisitCount(val yearMonth: String, val count: Int, val spend: Double)
 
 /** Flattened txn <-> tag edge, so a list screen can look up tags without N queries. */
 data class TxnTagLink(
@@ -308,7 +308,8 @@ interface ExpenseDao {
 
     @Query(
         """SELECT strftime('%Y-%m', timestamp / 1000, 'unixepoch', 'localtime') AS yearMonth,
-                  COUNT(*) AS count
+                  COUNT(*) AS count,
+                  SUM(CASE WHEN type = 'DEBIT' THEN amount ELSE 0 END) AS spend
            FROM transactions WHERE matchKey = :key
            GROUP BY yearMonth ORDER BY yearMonth"""
     )

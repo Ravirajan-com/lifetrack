@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.*
@@ -39,7 +40,7 @@ import java.util.Locale
  * to open that period's actual transactions, newest first.
  */
 @Composable
-fun TrendsTab(vm: ExpenseViewModel) {
+fun TrendsTab(vm: ExpenseViewModel, onBack: () -> Unit) {
     var granularity by remember { mutableStateOf(ExpenseViewModel.TrendGranularity.DAY) }
     var granularityMenuOpen by remember { mutableStateOf(false) }
     var selectedIndex by remember(granularity) { mutableStateOf<Int?>(null) }
@@ -76,6 +77,12 @@ fun TrendsTab(vm: ExpenseViewModel) {
             .padding(horizontal = 20.dp, vertical = 12.dp)
             .verticalScroll(rememberScrollState())
     ) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
+            Text("Trends", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        }
+        Spacer(Modifier.height(12.dp))
+
         Box {
             AssistChip(
                 onClick = { granularityMenuOpen = true },

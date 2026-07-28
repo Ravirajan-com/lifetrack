@@ -4,11 +4,13 @@ package com.lifetrack.app.ui.expense
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -52,6 +54,7 @@ import java.util.Locale
 @Composable
 fun ExpenseScreen(vm: ExpenseViewModel = viewModel()) {
     var tab by remember { mutableIntStateOf(0) }
+    var showTrends by remember { mutableStateOf(false) }
     var detailing by remember { mutableStateOf<TransactionEntity?>(null) }
     var showAddTxn by remember { mutableStateOf(value = false) }
     var showAddCategory by remember { mutableStateOf(false) }
@@ -62,7 +65,7 @@ fun ExpenseScreen(vm: ExpenseViewModel = viewModel()) {
 
     Scaffold(
         floatingActionButton = {
-            if (tab < 2) {
+            if (!showTrends && tab < 2) {
                 ExtendedFloatingActionButton(
                     onClick = { showAddTxn = true },
                     containerColor = Ink.mint,
@@ -74,17 +77,21 @@ fun ExpenseScreen(vm: ExpenseViewModel = viewModel()) {
         }
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
+            if (showTrends) {
+                TrendsTab(vm, onBack = { showTrends = false })
+                return@Column
+            }
             PrimaryTabRow(
                 selectedTabIndex = tab,
                 containerColor = MaterialTheme.colorScheme.background,
                 contentColor = Ink.mint,
             ) {
-                listOf("Overview", "Activity", "Trends", "Year", "Cards", "Inbox").forEachIndexed { i, t ->
+                listOf("Overview", "Activity", "Year", "Cards", "Inbox").forEachIndexed { i, t ->
                     Tab(
                         selected = tab == i,
                         onClick = { tab = i },
                         text = {
-                            val label = if ((i == 5) && (pendingCount > 0)) "$t · $pendingCount" else t
+                            val label = if ((i == 4) && (pendingCount > 0)) "$t · $pendingCount" else t
                             Text(label)
                         },
                         selectedContentColor = Ink.mint,
@@ -100,13 +107,13 @@ fun ExpenseScreen(vm: ExpenseViewModel = viewModel()) {
                     vm = vm,
                     onAddCategory = { showAddCategory = true },
                     onOpenBudgets = { showBudgets = true },
+                    onOpenTrends = { showTrends = true },
                     onEditCategory = { editingCategory = it }
                 )
                 1 -> ActivityTab(vm) { detailing = it }
-                2 -> TrendsTab(vm)
-                3 -> YearTab(vm) { showArchive = true }
-                4 -> CreditCardsTab(vm)
-                5 -> InboxTab(vm) { detailing = it }
+                2 -> YearTab(vm) { showArchive = true }
+                3 -> CreditCardsTab(vm)
+                4 -> InboxTab(vm) { detailing = it }
             }
         }
     }
@@ -190,6 +197,7 @@ private fun Dashboard(
     vm: ExpenseViewModel,
     onAddCategory: () -> Unit,
     onOpenBudgets: () -> Unit,
+    onOpenTrends: () -> Unit,
     onEditCategory: (CategoryEntity) -> Unit
 ) {
     val uiState by vm.uiState.collectAsState()
@@ -259,6 +267,15 @@ private fun Dashboard(
                                 Text("Set a monthly budget")
                             }
                         }
+                    }
+                }
+
+                InkCard(Modifier.fillMaxWidth().clickable(onClick = onOpenTrends)) {
+                    Row(Modifier.padding(16.dp).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.AutoMirrored.Filled.TrendingUp, null, tint = Ink.mint)
+                        Spacer(Modifier.width(12.dp))
+                        Text("Trends", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+                        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = Ink.textDim)
                     }
                 }
 
@@ -906,6 +923,11 @@ private fun monthLabel(yearMonth: String): String =
 private fun MerchantHistorySheet(vm: ExpenseViewModel, matchKey: String, merchantName: String, onDone: () -> Unit) {
     val monthly by remember(matchKey) { vm.visitsByMonth(matchKey) }.collectAsState(initial = emptyList())
     val txns by remember(matchKey) { vm.txnsForMerchant(matchKey) }.collectAsState(initial = emptyList())
+    var selectedMonth by remember(matchKey) { mutableStateOf<String?>(null) }
+    val ymFormat = remember { SimpleDateFormat("yyyy-MM", Locale.getDefault()) }
+    val shownTxns = remember(txns, selectedMonth) {
+        if (selectedMonth == null) txns else txns.filter { ymFormat.format(Date(it.timestamp)) == selectedMonth }
+    }
 
     Column(
         Modifier
@@ -928,22 +950,42 @@ private fun MerchantHistorySheet(vm: ExpenseViewModel, matchKey: String, merchan
         Spacer(Modifier.height(16.dp))
 
         if (monthly.isNotEmpty()) {
-            InkCard(Modifier.fillMaxWidth()) {
-                BarChart(
-                    bars = monthly.map { Bar(monthLabel(it.yearMonth), it.count.toDouble()) },
-                    color = Ink.mint,
-                    modifier = Modifier.padding(12.dp)
-                )
+            Eyebrow("Spend by month")
+            val maxSpend = monthly.maxOf { it.spend }.takeIf { it > 0 } ?: 1.0
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
+                monthly.forEach { m ->
+                    val isSel = m.yearMonth == selectedMonth
+                    Column(
+                        Modifier.width(64.dp).clickable { selectedMonth = if (isSel) null else m.yearMonth }.padding(vertical = 8.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Box(Modifier.width(28.dp).height((80.0 * (m.spend / maxSpend)).coerceAtLeast(4.0).dp)
+                            .background(if (isSel) Ink.mint else Ink.mint.copy(alpha = 0.35f), RoundedCornerShape(6.dp)))
+                        Spacer(Modifier.height(6.dp))
+                        Text(monthLabel(m.yearMonth), style = MaterialTheme.typography.labelSmall,
+                            color = if (isSel) Ink.mint else Ink.textDim, maxLines = 1)
+                    }
+                }
+            }
+            selectedMonth?.let { sel ->
+                val m = monthly.first { it.yearMonth == sel }
+                Spacer(Modifier.height(8.dp))
+                Text("${monthLabel(sel)} · ₹%,.0f · ${m.count} visit${if (m.count == 1) "" else "s"}".format(m.spend),
+                    style = MaterialTheme.typography.bodyMedium, color = Ink.mint)
             }
             Spacer(Modifier.height(20.dp))
         }
 
-        Eyebrow("All transactions")
-        if (txns.isEmpty()) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Eyebrow(if (selectedMonth == null) "All transactions" else "${monthLabel(selectedMonth!!)} transactions", Modifier.weight(1f))
+            if (selectedMonth != null) TextButton(onClick = { selectedMonth = null }) { Text("Show all", color = Ink.mint) }
+        }
+
+        if (shownTxns.isEmpty()) {
             Text("Nothing yet.", style = MaterialTheme.typography.labelSmall, color = Ink.textDim)
         } else {
             Column {
-                txns.forEach { t ->
+                shownTxns.forEach { t ->
                     Row(
                         Modifier.fillMaxWidth().padding(vertical = 10.dp),
                         horizontalArrangement = Arrangement.SpaceBetween
